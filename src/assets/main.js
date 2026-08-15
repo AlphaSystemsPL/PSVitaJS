@@ -1,5 +1,6 @@
-/// <reference src="">
+/// <reference path="./vitajs.d.ts" />
 let inc = 0;
+
 
 const font = Font.load_font_file("app0:/assets/segoeui.ttf");
 const WHITE=0xffffffff
@@ -14,6 +15,7 @@ const audio = Audio.load_wav("app0:/assets/audio.wav");
 const response = Net.get(
     "http://google.com"
 );
+
 
 console.log("status:", response.status);
 console.log("ok:", response.ok);
@@ -60,6 +62,7 @@ let interval = os.setInterval(() => {
     // ^ dando erro na linha 30. verificar se new_font (font.c) retorna a fonteId corretamente.
 
     Screen.draw_texture(texture1, x, y)
+
 
     Screen.end_drawing()
     Screen.swap_buffers()

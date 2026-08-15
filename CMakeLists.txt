@@ -100,6 +100,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
     NAME ${VITA_APP_NAME}
     FILE  
           src/assets/segoeui.ttf assets/segoeui.ttf
+          src/assets/vitajs.d.ts assets/vitajs.d.ts
           src/assets/main.js assets/main.js
           src/assets/test1.png assets/test1.png
           src/assets/audio.wav assets/audio.wav
