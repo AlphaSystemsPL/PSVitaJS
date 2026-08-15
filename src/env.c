@@ -60,6 +60,7 @@ static JSContext *JS_NewCustomContext(JSRuntime *rt)
     vitajs_pads_init(ctx);
     vitajs_font_init(ctx);
 	vitajs_net_init(ctx);
+	vitajs_audio_init(ctx);
 
     /*
     vitajs_archive_init(ctx);
@@ -237,6 +238,7 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
         "import * as Pads from 'Pads';\n"
         "import * as Font from 'Font';\n"
         "import * as Net from 'Net';\n"
+        "import * as Audio from 'Audio';\n"
 
         "globalThis.std = std;\n"
         "globalThis.os = os;\n"
@@ -245,6 +247,7 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
         "globalThis.Pads = Pads;\n"
         "globalThis.Font = Font;\n"
         "globalThis.Net = Net;\n"
+        "globalThis.Audio = Audio;\n"
         "";
 
     rc = qjs_eval_buf(ctx, str, strlen(str), "<input>", JS_EVAL_TYPE_MODULE);

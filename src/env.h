@@ -16,6 +16,7 @@ JSModuleDef *vitajs_system_init(JSContext *ctx);
 JSModuleDef *vitajs_render_init(JSContext *ctx);
 JSModuleDef *vitajs_screen_init(JSContext *ctx);
 JSModuleDef *vitajs_net_init(JSContext *ctx);
+JSModuleDef *vitajs_audio_init(JSContext *ctx);
 
 const char *runScript(const char *script);
 

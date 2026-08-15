@@ -48,6 +48,7 @@ add_executable(${PROJECT_NAME}
     src/modules/pads.c
     src/modules/font.c
     src/modules/net.c
+    src/modules/audio.c
     src/env.c
     src/graphics.c
     #src/taskman.c
@@ -77,6 +78,7 @@ target_link_libraries(${PROJECT_NAME}
     SceNet_stub
     SceNetCtl_stub
     SceHttp_stub
+	SceAudio_stub
 
     freetype
     png
@@ -100,6 +102,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
           src/assets/segoeui.ttf assets/segoeui.ttf
           src/assets/main.js assets/main.js
           src/assets/test1.png assets/test1.png
+          src/assets/audio.wav assets/audio.wav
           sce_sys/icon0.png sce_sys/icon0.png
           sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
           sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png

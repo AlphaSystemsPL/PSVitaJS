@@ -1,13 +1,15 @@
-
+/// <reference src="">
 let inc = 0;
 
-// let font = Font.load_font_file("app0:/assets/segoeui.ttf");
-
+const font = Font.load_font_file("app0:/assets/segoeui.ttf");
+const WHITE=0xffffffff
 const texture1 = Screen.load_png_file("app0:/assets/test1.png");
 
 let pads = Pads;
 let x = 200, y = 200;
 let steps = 3;
+
+const audio = Audio.load_wav("app0:/assets/audio.wav");
 
 const response = Net.get(
     "http://google.com"
@@ -18,6 +20,9 @@ console.log("ok:", response.ok);
 
 // Basically creates an infinite loop, similar to while true (you can use it too).
 let interval = os.setInterval(() => {
+	if (Pads.check(Pads.CROSS)) {
+		Audio.play(audio)
+	}
 
     if (pads.check(pads.UP))
         y -= steps;
@@ -32,7 +37,22 @@ let interval = os.setInterval(() => {
         x += steps;
 
     Screen.start_drawing()
-    Screen.clear(0, 50, 50, 0) // rgba
+
+    Screen.clear(
+        20,
+        20,
+        25,
+        255
+    );
+
+    Font.font_draw_text(
+        font,
+        50,
+        80,
+        WHITE,
+        32,
+        "Press X"
+    );
 
     //console.log(font)
 
