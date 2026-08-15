@@ -630,40 +630,6 @@ console.log(
 );
 ```
 
-## Local development server
-
-The Vita cannot use your computer's `localhost`.
-
-Start a server that listens on the LAN:
-
-```bash
-python3 -m http.server 3000 --bind 0.0.0.0
-```
-
-On macOS you can get your Wi-Fi IP with:
-
-```bash
-ipconfig getifaddr en0
-```
-
-For example:
-
-```text
-192.168.1.20
-```
-
-Then access it from Vita:
-
-```js
-Net.get(
-    "http://192.168.1.20:3000/test.json"
-);
-```
-
-Both devices must be reachable through the same local network.
-
----
-
 # System and filesystem
 
 VitaJS exposes both the native `System` module and QuickJS `std` / `os` helpers.
