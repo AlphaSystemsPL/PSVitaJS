@@ -859,21 +859,6 @@ Potential future improvements include:
 
 ---
 
-# Example files
-
-More focused examples are available in the [`examples`](examples) directory:
-
-```text
-examples/
-├── sprite.js
-├── font.js
-├── audio.js
-├── net.js
-└── complete-demo.js
-```
-
----
-
 # Credits
 
 VitaJS builds on the work of the PS Vita homebrew ecosystem.
