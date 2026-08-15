@@ -47,6 +47,7 @@ add_executable(${PROJECT_NAME}
     src/modules/system.c
     src/modules/pads.c
     src/modules/font.c
+    src/modules/net.c
     src/env.c
     src/graphics.c
     #src/taskman.c
@@ -63,14 +64,20 @@ add_executable(${PROJECT_NAME}
 # NOTE: png[lib] should stay BEFORE z[lib] here.
 target_link_libraries(${PROJECT_NAME}
     vita2d
+
     SceGxm_stub
-    SceDisplay_stub   # used by debugScreenPrintf()
+    SceDisplay_stub
     SceSysmodule_stub
     SceAppMgr_stub
     SceCommonDialog_stub
     SceCtrl_stub
     SceSysmem_stub
     ScePvf_stub
+
+    SceNet_stub
+    SceNetCtl_stub
+    SceHttp_stub
+
     freetype
     png
     jpeg

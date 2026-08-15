@@ -9,6 +9,13 @@ let pads = Pads;
 let x = 200, y = 200;
 let steps = 3;
 
+const response = Net.get(
+    "http://google.com"
+);
+
+console.log("status:", response.status);
+console.log("ok:", response.ok);
+
 // Basically creates an infinite loop, similar to while true (you can use it too).
 let interval = os.setInterval(() => {
 
@@ -46,3 +53,47 @@ let interval = os.setInterval(() => {
         return;
     }
 }, 0);
+
+
+const SAVE_DIR = "ux0:/data/VITAJS001";
+const SAVE_FILE = `${SAVE_DIR}/save.json`;
+
+os.mkdir(SAVE_DIR);
+
+function saveGame(state) {
+    const file = std.open(SAVE_FILE, "w");
+
+    if (!file) {
+        throw new Error("Cannot open save file");
+    }
+
+    file.puts(JSON.stringify(state));
+    file.flush();
+    file.close();
+}
+
+saveGame({
+    level: 4,
+    score: 12500,
+    player: {
+        x: 350,
+        y: 180
+    },
+    savedAt: Date.now()
+});
+
+function loadGame() {
+    const data = std.loadFile(SAVE_FILE);
+
+    if (data === null) {
+        return null;
+    }
+
+    return JSON.parse(data);
+}
+
+const state = loadGame();
+
+if (state) {
+    console.log("Score:", state.score);
+}
