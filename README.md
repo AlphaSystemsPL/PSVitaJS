@@ -1,5 +1,7 @@
 # VitaJS
 
+>VitaJS was originally created by faelpinho and is now actively developed and extended by AlphaSystemsPL.
+
 **VitaJS** is an experimental JavaScript runtime for building games and applications for the **PlayStation Vita**.
 
 It embeds **QuickJS** and exposes native PS Vita / vita2d functionality to JavaScript through modules such as `Screen`, `Pads`, `Font`, `Audio`, `System`, and `Net`.
