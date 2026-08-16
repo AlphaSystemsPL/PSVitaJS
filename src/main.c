@@ -35,10 +35,8 @@ int main(int argc, char *argv[])
 
     vitajs_error_screen(errMsg);
 
-    do
-    {
+    do{
         sceCtrlPeekBufferPositive(0, &ctrl, 1);
-        printf("loop\n");
     } while (ctrl.buttons != SCE_CTRL_START);
 
     // freeFont();

@@ -94,25 +94,53 @@ const char *runScript(const char *script)
 
     JSContext *ctx = JS_NewCustomContext(rt);
     if (!ctx)
+    {
+        js_std_free_handlers(rt);
+        JS_FreeRuntime(rt);
         return "Context creation failed.";
+    }
 
+    /*
+     * Keep the Vita-patched QuickJS libc module loader.
+     * The modern QuickJS core still supports JS_SetModuleLoaderFunc()
+     * and the legacy three-argument loader callback used by VitaJS.
+     */
     JS_SetModuleLoaderFunc(rt, NULL, js_module_loader, NULL);
 
     int s = qjs_handle_file(ctx, script);
 
-    js_std_loop(ctx); // L153
+    /*
+     * Process timers, promises and pending jobs only after the source
+     * successfully compiled/evaluated.
+     */
+    if (s >= 0)
+        js_std_loop(ctx);
+
     if (s < 0)
     {
         JSValue exception_val = JS_GetException(ctx);
-        const char *exception = JS_ToCString(ctx, exception_val);
         JSValue stack_val = JS_GetPropertyStr(ctx, exception_val, "stack");
-        const char *stack = JS_ToCString(ctx, stack_val);
-        JS_FreeValue(ctx, exception_val);
-        JS_FreeValue(ctx, stack_val);
 
-        strcpy(error_buf, exception);
-        strcat(error_buf, "\n");
-        strcat(error_buf, stack);
+        const char *exception = JS_ToCString(ctx, exception_val);
+        const char *stack = JS_ToCString(ctx, stack_val);
+
+        snprintf(
+            error_buf,
+            sizeof(error_buf),
+            "%s%s%s",
+            exception ? exception : "JavaScript exception",
+            stack ? "\n" : "",
+            stack ? stack : ""
+        );
+
+        if (exception)
+            JS_FreeCString(ctx, exception);
+        if (stack)
+            JS_FreeCString(ctx, stack);
+
+        JS_FreeValue(ctx, stack_val);
+        JS_FreeValue(ctx, exception_val);
+
         js_std_free_handlers(rt);
         JS_FreeContext(ctx);
         JS_FreeRuntime(rt);
@@ -138,8 +166,6 @@ static int qjs_handle_file(JSContext *ctx, const char *filename)
         fflush(stderr);
         return retval;
     }
-
-    js_std_loop(ctx);
 
     retval = qjs_handle_fh(ctx, f, filename);
 
@@ -232,7 +258,7 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
 #undef VITAJS_MODULE
         "";
 
-    rc = qjs_eval_buf(ctx, str, strlen(str), "<input>", JS_EVAL_TYPE_MODULE);
+    rc = qjs_eval_buf(ctx, str, strlen(str), "<vitajs-bootstrap>", JS_EVAL_TYPE_MODULE);
 
     if (rc != 0)
     {
@@ -255,17 +281,47 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
     return retval;
 }
 
-static int qjs_eval_buf(JSContext *ctx, const void *buf, int buf_len, const char *filename, int eval_flags)
+static int qjs_eval_buf(
+    JSContext *ctx,
+    const void *buf,
+    size_t buf_len,
+    const char *filename,
+    int eval_flags)
 {
     JSValue val;
-    int ret;
+    int ret = 0;
+
     if ((eval_flags & JS_EVAL_TYPE_MASK) == JS_EVAL_TYPE_MODULE)
     {
-        /* for the modules, we compile then run to be able to set import.meta */
-        val = JS_Eval(ctx, buf, buf_len, filename, eval_flags | JS_EVAL_FLAG_COMPILE_ONLY);
+        /*
+         * Compile first so import.meta can be initialized before execution.
+         *
+         * IMPORTANT FOR VITA:
+         * Never ask QuickJS libc to realpath() module names here.
+         * Vita uses paths such as app0:/assets/main.js and the bootstrap uses
+         * a synthetic name. Calling realpath() caused Vita3K to probe
+         * app0:/<input> and could leave a pending exception.
+         */
+        val = JS_Eval(
+            ctx,
+            buf,
+            buf_len,
+            filename,
+            eval_flags | JS_EVAL_FLAG_COMPILE_ONLY
+        );
+
         if (!JS_IsException(val))
         {
-            js_module_set_import_meta(ctx, val, TRUE, TRUE);
+            JS_BOOL is_main =
+                filename &&
+                strcmp(filename, "<vitajs-bootstrap>") != 0;
+
+            if (js_module_set_import_meta(ctx, val, FALSE, is_main) < 0)
+            {
+                JS_FreeValue(ctx, val);
+                return -1;
+            }
+
             val = JS_EvalFunction(ctx, val);
         }
     }
@@ -273,14 +329,10 @@ static int qjs_eval_buf(JSContext *ctx, const void *buf, int buf_len, const char
     {
         val = JS_Eval(ctx, buf, buf_len, filename, eval_flags);
     }
+
     if (JS_IsException(val))
-    {
         ret = -1;
-    }
-    else
-    {
-        ret = 0;
-    }
+
     JS_FreeValue(ctx, val);
     return ret;
 }

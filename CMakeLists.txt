@@ -29,6 +29,16 @@ set(VITA_VERSION  "01.00")
 ## Flags and includes for building
 # Note that we make sure not to overwrite previous flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wno-all -Wno-int-conversion -DPATH_MAX=256")
+
+# Read the version directly from the upstream QuickJS directory.
+# Expected after this upgrade: 2026-06-04.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/quickjs/VERSION" QUICKJS_VERSION LIMIT_COUNT 1)
+if(NOT QUICKJS_VERSION)
+    message(FATAL_ERROR "quickjs/VERSION is missing or empty")
+endif()
+message(STATUS "Building with QuickJS ${QUICKJS_VERSION}")
+
+add_definitions(-DCONFIG_VERSION="${QUICKJS_VERSION}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 
 # Add any additional include paths here
@@ -54,13 +64,27 @@ add_executable(${PROJECT_NAME}
     src/env.c
     src/graphics.c
     #src/taskman.c
+    # QuickJS 2026 core.
+    # Keep PSVitaJS' existing Vita-patched quickjs-libc.c / quickjs-libc.h.
     quickjs/cutils.c
-    quickjs/libbf.c
+    quickjs/dtoa.c
     quickjs/libregexp.c
     quickjs/libunicode.c
     quickjs/quickjs.c
     quickjs/quickjs-libc.c
     src/common/debugScreen.c
+)
+
+# Keep upstream QuickJS optimizer assumptions explicit.
+# -fwrapv is required by upstream QuickJS; -O2 matches the upstream optimized build.
+set_source_files_properties(
+    quickjs/cutils.c
+    quickjs/dtoa.c
+    quickjs/libregexp.c
+    quickjs/libunicode.c
+    quickjs/quickjs.c
+    quickjs/quickjs-libc.c
+    PROPERTIES COMPILE_FLAGS "-O2 -fwrapv"
 )
 
 # Library to link to (drop the -l prefix). This will mostly be stubs.

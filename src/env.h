@@ -4,6 +4,43 @@
 #include "../quickjs/quickjs-libc.h"
 #include "../quickjs/cutils.h"
 
+/*
+ * PSVitaJS compatibility helpers.
+ *
+ * Older PSVitaJS QuickJS fork exposed JS_ToFloat32 / JS_NewFloat32.
+ * Upstream QuickJS uses Number (double), so convert at the C API boundary.
+ */
+static inline int JS_ToFloat32(
+    JSContext *ctx,
+    float *pres,
+    JSValueConst val)
+{
+    double value;
+
+    int ret = JS_ToFloat64(
+        ctx,
+        &value,
+        val
+    );
+
+    if (ret < 0)
+        return ret;
+
+    *pres = (float)value;
+
+    return 0;
+}
+
+static inline JSValue JS_NewFloat32(
+    JSContext *ctx,
+    float value)
+{
+    return JS_NewFloat64(
+        ctx,
+        (double)value
+    );
+}
+
 static SceCtrlData ctrl;
 
 unsigned int isButtonPressed();
@@ -25,7 +62,7 @@ JSModuleDef *vitajs_render_init(JSContext *ctx);
 const char *runScript(const char *script);
 static int qjs_handle_file(JSContext *ctx, const char *filename);
 static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename);
-static int qjs_eval_buf(JSContext *ctx, const void *buf, int buf_len, const char *filename, int eval_flags);
+static int qjs_eval_buf(JSContext *ctx, const void *buf, size_t buf_len, const char *filename, int eval_flags);
 
 unsigned int get_used_memory();
 unsigned int get_free_memory();

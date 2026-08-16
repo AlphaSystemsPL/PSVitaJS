@@ -736,8 +736,7 @@ static JSValue js_evalScript(JSContext *ctx, JSValueConst this_val,
         os_pending_signals &= ~((uint64_t)1 << SIGINT);
         /* convert the uncatchable "interrupted" error into a normal error
            so that it can be caught by the REPL */
-        if (JS_IsException(ret))
-            JS_ResetUncatchableError(ctx);
+        if (JS_IsException(ret)) JS_SetUncatchableException(ctx, FALSE);
     }
     return ret;
 }
