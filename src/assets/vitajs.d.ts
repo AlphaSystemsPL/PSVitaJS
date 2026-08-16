@@ -908,6 +908,165 @@ interface VitaStdAPI {
     readonly err: VitaStdFile;
 }
 
+
+/* ==========================================================================
+ * App
+ * ========================================================================== */
+
+type VitaAppEventType =
+    | "resume"
+    | "storePurchase"
+    | "npMessageArrived"
+    | "storeRedemption"
+    | "unknown";
+
+interface VitaAppEvent {
+    type: VitaAppEventType;
+    rawType: number;
+}
+
+interface VitaAppInfoBarOptions {
+    visible?: boolean;
+    color?: "black" | "white";
+    translucent?: boolean;
+}
+
+interface VitaAppAPI {
+    exit(code?: number): never;
+    getLaunchParams(): string;
+    pollEvent(): VitaAppEvent | null;
+    setInfoBar(options: VitaAppInfoBarOptions): void;
+
+    readonly EVENT_RESUME: number;
+    readonly EVENT_STORE_PURCHASE: number;
+    readonly EVENT_NP_MESSAGE_ARRIVED: number;
+    readonly EVENT_STORE_REDEMPTION: number;
+}
+
+/* ==========================================================================
+ * Native dialogs
+ * ========================================================================== */
+
+type VitaDialogStatus = "none" | "running" | "finished";
+type VitaDialogCommonResult = "ok" | "canceled" | "aborted" | "unknown";
+
+type VitaMessageDialogButtons =
+    | "ok"
+    | "yesNo"
+    | "okCancel"
+    | "cancel"
+    | "none";
+
+interface VitaMessageDialogOptions {
+    text: string;
+    buttons?: VitaMessageDialogButtons;
+}
+
+type VitaKeyboardType =
+    | "text"
+    | "latin"
+    | "number"
+    | "extendedNumber"
+    | "url"
+    | "email";
+
+type VitaKeyboardEnterLabel =
+    | "default"
+    | "send"
+    | "search"
+    | "go";
+
+interface VitaKeyboardDialogOptions {
+    title?: string;
+    initialText?: string;
+    maxLength?: number;
+    type?: VitaKeyboardType;
+    password?: boolean;
+    withClear?: boolean;
+    withCancel?: boolean;
+    multiline?: boolean;
+    noAutoCapitalization?: boolean;
+    noAssistance?: boolean;
+    enterLabel?: VitaKeyboardEnterLabel;
+}
+
+interface VitaMessageDialogResult {
+    type: "message";
+    result: VitaDialogCommonResult;
+    button: "ok" | "yes" | "no" | "cancel" | "invalid";
+    buttonId: number;
+}
+
+interface VitaKeyboardDialogResult {
+    type: "keyboard";
+    result: VitaDialogCommonResult;
+    confirmed: boolean;
+    text: string;
+}
+
+type VitaDialogResult =
+    | VitaMessageDialogResult
+    | VitaKeyboardDialogResult;
+
+interface VitaDialogAPI {
+    message(options: VitaMessageDialogOptions): true;
+    keyboard(options: VitaKeyboardDialogOptions): true;
+    status(): VitaDialogStatus;
+    update(): VitaDialogStatus;
+    result(): VitaDialogResult | null;
+    abort(): boolean;
+}
+
+/* ==========================================================================
+ * Power
+ * ========================================================================== */
+
+interface VitaBatteryInfo {
+    percent: number;
+    charging: boolean;
+    pluggedIn: boolean;
+    low: boolean;
+    remainingMinutes: number;
+    remainingCapacity: number;
+    fullCapacity: number;
+    temperature: number;
+    voltage: number;
+    health: number;
+    cycles: number;
+}
+
+interface VitaPowerClocks {
+    cpu: number;
+    bus: number;
+    gpu: number;
+    gpuXbar: number;
+}
+
+interface VitaPowerClockOptions {
+    cpu?: number;
+    bus?: number;
+    gpu?: number;
+    gpuXbar?: number;
+}
+
+interface VitaPowerAPI {
+    getBatteryInfo(): VitaBatteryInfo;
+    getClocks(): VitaPowerClocks;
+
+    getBatteryPercent(): number;
+    isCharging(): boolean;
+    isPluggedIn(): boolean;
+    isLowBattery(): boolean;
+    isSuspendRequired(): boolean;
+
+    setClocks(options: VitaPowerClockOptions): VitaPowerClocks;
+
+    suspend(): void;
+    standby(): void;
+    requestDisplayOn(): void;
+    requestDisplayOff(): void;
+}
+
 /* ==========================================================================
  * Console
  * ========================================================================== */
@@ -926,6 +1085,9 @@ declare const Screen: VitaScreenAPI;
 declare const Font: VitaFontAPI;
 declare const Audio: VitaAudioAPI;
 declare const Net: VitaNetAPI;
+declare const App: VitaAppAPI;
+declare const Dialog: VitaDialogAPI;
+declare const Power: VitaPowerAPI;
 
 declare const os: VitaOSAPI;
 declare const std: VitaStdAPI;

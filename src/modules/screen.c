@@ -272,26 +272,45 @@ static JSValue vitajs_draw_line(JSContext *ctx, JSValue this_val, int argc, JSVa
 	return JS_UNDEFINED;
 }
 
-static JSValue vitajs_draw_rectangle(JSContext *ctx, JSValue this_val, int argc, JSValueConst *argv)
+static JSValue vitajs_draw_rectangle(
+    JSContext *ctx,
+    JSValueConst this_val,
+    int argc,
+    JSValueConst *argv)
 {
-	if (argc != 5)
-		return JS_ThrowSyntaxError(ctx, "wrong number of arguments. Expected five (x, y, w, h, color: number)");
+    if (argc != 5)
+        return JS_ThrowSyntaxError(
+            ctx,
+            "draw_rectangle(x, y, width, height, color) expects 5 arguments"
+        );
 
-	uint32_t x, y, w, h, color = 0;
-	JS_ToUint32(ctx, &x, argv[0]);
-	JS_ToUint32(ctx, &y, argv[1]);
-	JS_ToUint32(ctx, &w, argv[2]);
-	JS_ToUint32(ctx, &h, argv[3]);
-	JS_ToUint32(ctx, &color, argv[4]);
+    double x;
+    double y;
+    double w;
+    double h;
+    uint32_t color;
 
-	vita2d_draw_rectangle(x, y, w, h, color);
+    if (JS_ToFloat64(ctx, &x, argv[0]) ||
+        JS_ToFloat64(ctx, &y, argv[1]) ||
+        JS_ToFloat64(ctx, &w, argv[2]) ||
+        JS_ToFloat64(ctx, &h, argv[3]) ||
+        JS_ToUint32(ctx, &color, argv[4]))
+    {
+        return JS_EXCEPTION;
+    }
 
-	JS_FreeValue(ctx, argv[0]);
-	JS_FreeValue(ctx, argv[1]);
-	JS_FreeValue(ctx, argv[2]);
-	JS_FreeValue(ctx, argv[3]);
-	JS_FreeValue(ctx, argv[4]);
-	return JS_UNDEFINED;
+    if (w <= 0 || h <= 0)
+        return JS_UNDEFINED;
+
+    vita2d_draw_rectangle(
+        (float)x,
+        (float)y,
+        (float)w,
+        (float)h,
+        color
+    );
+
+    return JS_UNDEFINED;
 }
 
 static JSValue vitajs_draw_fill_circle(JSContext *ctx, JSValue this_val, int argc, JSValueConst *argv)

@@ -5,7 +5,6 @@
 #include <string.h>
 
 #include "env.h"
-
 #define TRUE 1
 
 // get_used_memory
@@ -25,7 +24,6 @@ unsigned int get_free_memory()
     sceAppMgrGetBudgetInfo(&info);
     return info.total_user_rw_mem;
 }
-
 // get_used_vram
 unsigned int get_used_vram()
 {
@@ -55,21 +53,13 @@ static JSContext *JS_NewCustomContext(JSRuntime *rt)
     js_init_module_std(ctx, "std");
     js_init_module_os(ctx, "os");
 
-    vitajs_system_init(ctx);
-    vitajs_screen_init(ctx);
-    vitajs_pads_init(ctx);
-    vitajs_font_init(ctx);
-	vitajs_net_init(ctx);
-	vitajs_audio_init(ctx);
-
     /*
-    vitajs_archive_init(ctx);
-    vitajs_timer_init(ctx);
-    vitajs_task_init(ctx);
-    vitajs_sound_init(ctx);
-    vitajs_camera_init(ctx);
-    vitajs_network_init(ctx);
-    */
+     * All VitaJS native modules are registered from one list.
+     * To add another native module, add its init function to modules.def.
+     */
+#define VITAJS_MODULE(js_name, init_fn) init_fn(ctx);
+#include "modules/modules.def"
+#undef VITAJS_MODULE
 
     return ctx;
 }
@@ -111,7 +101,6 @@ const char *runScript(const char *script)
     int s = qjs_handle_file(ctx, script);
 
     js_std_loop(ctx); // L153
-
     if (s < 0)
     {
         JSValue exception_val = JS_GetException(ctx);
@@ -124,7 +113,6 @@ const char *runScript(const char *script)
         strcpy(error_buf, exception);
         strcat(error_buf, "\n");
         strcat(error_buf, stack);
-
         js_std_free_handlers(rt);
         JS_FreeContext(ctx);
         JS_FreeRuntime(rt);
@@ -143,7 +131,6 @@ static int qjs_handle_file(JSContext *ctx, const char *filename)
 {
     FILE *f = NULL;
     int retval = -1;
-
     f = fopen(filename, "r");
     if (!f)
     {
@@ -184,14 +171,12 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
     for (;;)
     {
         size_t avail = bufsz - bufoff;
-
         if (avail < 1024)
         {
             printf("qjs_handle_fh: if avail < 1024 = %i\n", avail);
 
             size_t newsz = bufsz + (bufsz >> 2) + 1024; /* +25% and some extra */
             char *buf_new;
-
             if (newsz < bufsz)
             {
                 if (buf)
@@ -214,11 +199,9 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
             buf = buf_new;
             bufsz = newsz;
         }
-
         avail = bufsz - bufoff;
 
         size_t got = fread((void *)(buf + bufoff), (size_t)1, avail, f);
-
         if (got == 0)
         {
             break;
@@ -230,24 +213,23 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
 
     js_std_add_helpers(ctx, 0, NULL);
 
+    /*
+     * std/os and every native VitaJS module are exposed as globals.
+     * The native module list is generated from the same modules.def file used
+     * by JS_NewCustomContext(), so adding a module no longer requires editing
+     * this bootstrap manually.
+     */
     const char *str =
         "import * as std from 'std';\n"
         "import * as os from 'os';\n"
-        "import * as System from 'System';\n"
-        "import * as Screen from 'Screen';\n"
-        "import * as Pads from 'Pads';\n"
-        "import * as Font from 'Font';\n"
-        "import * as Net from 'Net';\n"
-        "import * as Audio from 'Audio';\n"
-
+#define VITAJS_MODULE(js_name, init_fn) "import * as " #js_name " from '" #js_name "';\n"
+#include "modules/modules.def"
+#undef VITAJS_MODULE
         "globalThis.std = std;\n"
         "globalThis.os = os;\n"
-        "globalThis.System = System;\n"
-        "globalThis.Screen = Screen;\n"
-        "globalThis.Pads = Pads;\n"
-        "globalThis.Font = Font;\n"
-        "globalThis.Net = Net;\n"
-        "globalThis.Audio = Audio;\n"
+#define VITAJS_MODULE(js_name, init_fn) "globalThis." #js_name " = " #js_name ";\n"
+#include "modules/modules.def"
+#undef VITAJS_MODULE
         "";
 
     rc = qjs_eval_buf(ctx, str, strlen(str), "<input>", JS_EVAL_TYPE_MODULE);
@@ -257,7 +239,6 @@ static int qjs_handle_fh(JSContext *ctx, FILE *f, const char *filename)
         free(buf);
         return retval;
     }
-
     rc = qjs_eval_buf(ctx, (void *)buf, bufoff - 1, filename, JS_EVAL_TYPE_MODULE);
 
     free(buf);
@@ -278,7 +259,6 @@ static int qjs_eval_buf(JSContext *ctx, const void *buf, int buf_len, const char
 {
     JSValue val;
     int ret;
-
     if ((eval_flags & JS_EVAL_TYPE_MASK) == JS_EVAL_TYPE_MODULE)
     {
         /* for the modules, we compile then run to be able to set import.meta */

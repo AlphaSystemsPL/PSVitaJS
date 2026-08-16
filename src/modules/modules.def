@@ -1,0 +1,19 @@
+/*
+ * VitaJS native modules registry.
+ *
+ * Add a module here once. The same list is used to:
+ *   - declare init functions in env.h
+ *   - register modules in every QuickJS context
+ *   - expose modules on globalThis in the JS bootstrap
+ *
+ * C source files placed in src/modules are collected by CMake.
+ */
+VITAJS_MODULE(System, vitajs_system_init)
+VITAJS_MODULE(Screen, vitajs_screen_init)
+VITAJS_MODULE(Pads, vitajs_pads_init)
+VITAJS_MODULE(Font, vitajs_font_init)
+VITAJS_MODULE(Net, vitajs_net_init)
+VITAJS_MODULE(Audio, vitajs_audio_init)
+VITAJS_MODULE(App, vitajs_app_init)
+VITAJS_MODULE(Dialog, vitajs_dialog_init)
+VITAJS_MODULE(Power, vitajs_power_init)

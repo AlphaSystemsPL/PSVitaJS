@@ -40,15 +40,17 @@ include_directories(
 # Add any additional library paths here
 
 ## Build and link
+# Native VitaJS modules are discovered automatically.
+# net_async.c is experimental and intentionally excluded until it replaces net.c.
+file(GLOB VITAJS_MODULE_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/*.c"
+)
+list(FILTER VITAJS_MODULE_SOURCES EXCLUDE REGEX "/net_async\\.c$")
+
 # Add all the files needed to compile here
 add_executable(${PROJECT_NAME}
     src/main.c
-    src/modules/screen.c
-    src/modules/system.c
-    src/modules/pads.c
-    src/modules/font.c
-    src/modules/net.c
-    src/modules/audio.c
+    ${VITAJS_MODULE_SOURCES}
     src/env.c
     src/graphics.c
     #src/taskman.c
@@ -70,7 +72,11 @@ target_link_libraries(${PROJECT_NAME}
     SceDisplay_stub
     SceSysmodule_stub
     SceAppMgr_stub
+    SceAppUtil_stub
+    SceProcessmgr_stub
     SceCommonDialog_stub
+    SceIme_stub
+    ScePower_stub
     SceCtrl_stub
     SceSysmem_stub
     ScePvf_stub
@@ -78,7 +84,7 @@ target_link_libraries(${PROJECT_NAME}
     SceNet_stub
     SceNetCtl_stub
     SceHttp_stub
-	SceAudio_stub
+    SceAudio_stub
 
     freetype
     png
@@ -102,8 +108,10 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
           src/assets/segoeui.ttf assets/segoeui.ttf
           src/assets/vitajs.d.ts assets/vitajs.d.ts
           src/assets/main.js assets/main.js
+          src/assets/game.js assets/game.js
           src/assets/test1.png assets/test1.png
           src/assets/audio.wav assets/audio.wav
+          src/assets/coin.wav assets/coin.wav
           sce_sys/icon0.png sce_sys/icon0.png
           sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
           sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
