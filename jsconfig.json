@@ -9,8 +9,8 @@
         "types": []
     },
     "include": [
-        "src/**/*.js",
-        "src/**/*.d.ts"
+        "src/assets/**/*.js",
+        "src/assets/**/*.d.ts"
     ],
     "exclude": [
         "build",
