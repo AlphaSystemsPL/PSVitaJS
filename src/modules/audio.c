@@ -2,1113 +2,1112 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <pthread.h>
-
 #include <psp2/audioout.h>
-
 #include "../env.h"
+#include <tremor/ivorbisfile.h>
+#define OUT_RATE 48000
+#define GRAIN 1024
+#define MAX_CLIPS 64
+#define MAX_VOICES 16
+#define MAX_STREAMS 4
+#define MAX_WAV_BYTES (64u * 1024u * 1024u)
+#define STREAM_CACHE 4096
 
-/*
- * VitaJS Audio module
- * -------------------
- *
- * Small game-audio mixer for sound effects.
- *
- * Input:
- *   RIFF/WAVE, PCM, signed 16-bit, mono or stereo.
- *   Common source sample rates are accepted and resampled to 48 kHz.
- *
- * Output:
- *   48 kHz, signed 16-bit stereo through SCE_AUDIO_OUT_PORT_TYPE_MAIN.
- *
- * Features:
- *   - up to 64 loaded clips
- *   - up to 16 simultaneous voices
- *   - play/stop/loop
- *   - per-voice volume
- *   - master volume
- *   - playback runs on a native audio thread, never blocks QuickJS
- *
- * JavaScript API:
- *
- *   const laser = Audio.load_wav("app0:/assets/laser.wav");
- *
- *   const voice = Audio.play(laser);
- *   Audio.play(laser, 0.5);
- *   Audio.play(laser, 1.0, true); // loop
- *
- *   Audio.stop(voice);
- *   Audio.stop_all();
- *   Audio.is_playing(voice);
- *   Audio.set_voice_volume(voice, 0.5);
- *   Audio.set_master_volume(0.8);
- *
- *   Audio.free(laser);
- *   Audio.term();
- *
- * Clip and voice values are integer handles. This deliberately avoids
- * unnecessary QuickJS native object lifetimes for audio resources.
- */
-
-#define AUDIO_OUTPUT_RATE       48000
-#define AUDIO_GRAIN_FRAMES      1024
-#define AUDIO_CHANNELS          2
-
-#define AUDIO_MAX_CLIPS         64
-#define AUDIO_MAX_VOICES        16
-
-#define AUDIO_MAX_WAV_BYTES     (64u * 1024u * 1024u)
-
-typedef struct AudioClip
+typedef struct
 {
-    int used;
-    int16_t *samples;     /* interleaved stereo, always 48 kHz */
-    uint32_t frames;
-} AudioClip;
-
-typedef struct AudioVoice
+	int used;
+	int16_t *samples;
+	uint32_t frames;
+} Clip;
+typedef struct
 {
-    int active;
-    int clip_id;
-    uint32_t position;
-    float volume;
-    int loop;
-} AudioVoice;
-
-typedef struct WavInfo
+	int active, clip;
+	uint32_t pos;
+	float vol;
+	int loop;
+} Voice;
+typedef struct
 {
-    uint16_t audio_format;
-    uint16_t channels;
-    uint32_t sample_rate;
-    uint16_t bits_per_sample;
-
-    long data_offset;
-    uint32_t data_size;
+	uint16_t format, channels;
+	uint32_t rate;
+	uint16_t bits;
+	long data_off;
+	uint32_t data_size;
 } WavInfo;
-
-static AudioClip clips[AUDIO_MAX_CLIPS];
-static AudioVoice voices[AUDIO_MAX_VOICES];
-
-static pthread_mutex_t audio_mutex;
-static pthread_t audio_thread;
-
-static int audio_mutex_initialized = 0;
-static volatile int audio_running = 0;
-static int audio_initialized = 0;
-static int audio_port = -1;
-
-static float master_volume = 1.0f;
-
-static uint16_t read_u16_le(FILE *f)
+typedef enum
 {
-    uint8_t b[2];
+	STREAM_NONE = 0,
+	STREAM_WAV = 1,
+	STREAM_OGG = 2
+} StreamType;
 
-    if (fread(b, 1, 2, f) != 2)
-        return 0;
+typedef struct
+{
+	int used, playing, paused, loop;
+	StreamType type;
 
-    return (uint16_t)(
-        ((uint16_t)b[0]) |
-        ((uint16_t)b[1] << 8));
+	FILE *f; /* WAV only. OGG FILE* is owned by ov_open()/ov_clear(). */
+	WavInfo info;
+
+	OggVorbis_File ogg;
+	int ogg_open;
+	ogg_int64_t ogg_decode_frame;
+
+	uint32_t rate;
+	uint16_t channels;
+	ogg_int64_t frames;
+
+	double pos;
+	float vol;
+
+	ogg_int64_t cache_start;
+	uint32_t cache_frames;
+	int16_t cache[STREAM_CACHE * 2]; /* always interleaved stereo PCM16 */
+} Stream;
+static Clip clips[MAX_CLIPS];
+static Voice voices[MAX_VOICES];
+static Stream streams[MAX_STREAMS];
+static int16_t ogg_decode_buffer[STREAM_CACHE * 2];
+static pthread_mutex_t mutex;
+static pthread_t thread;
+static int mutex_init, initialized, port = -1;
+static volatile int running;
+static float master = 1.0f;
+static uint16_t u16(FILE *f)
+{
+	uint8_t b[2];
+	if (fread(b, 1, 2, f) != 2)
+		return 0;
+	return b[0] | ((uint16_t)b[1] << 8);
+}
+static uint32_t u32(FILE *f)
+{
+	uint8_t b[4];
+	if (fread(b, 1, 4, f) != 4)
+		return 0;
+	return b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+static int16_t clamp16(int32_t v) { return v > 32767 ? 32767 : v < -32768 ? -32768
+																		  : (int16_t)v; }
+static float clampv(float v) { return v < 0 ? 0 : v > 1 ? 1
+														: v; }
+static int parse_wav(FILE *f, WavInfo *i, int enforce_max)
+{
+	char id[4];
+	memset(i, 0, sizeof(*i));
+	if (fread(id, 1, 4, f) != 4 || memcmp(id, "RIFF", 4))
+		return -1;
+	(void)u32(f);
+	if (fread(id, 1, 4, f) != 4 || memcmp(id, "WAVE", 4))
+		return -1;
+	int ff = 0, fd = 0;
+	while (!ff || !fd)
+	{
+		if (fread(id, 1, 4, f) != 4)
+			break;
+		uint32_t n = u32(f);
+		long p = ftell(f);
+		if (!memcmp(id, "fmt ", 4))
+		{
+			if (n < 16)
+				return -1;
+			i->format = u16(f);
+			i->channels = u16(f);
+			i->rate = u32(f);
+			(void)u32(f);
+			(void)u16(f);
+			i->bits = u16(f);
+			ff = 1;
+		}
+		else if (!memcmp(id, "data", 4))
+		{
+			i->data_off = p;
+			i->data_size = n;
+			fd = 1;
+		}
+		if (fseek(f, p + n + (n & 1), SEEK_SET) != 0)
+			return -1;
+	}
+	if (!ff || !fd || i->format != 1 || i->bits != 16 || (i->channels != 1 && i->channels != 2) || !i->rate || !i->data_size)
+		return -2;
+	if (enforce_max && i->data_size > MAX_WAV_BYTES)
+		return -3;
+	return 0;
+}
+static int load_clip(const char *path, int16_t **out, uint32_t *outframes)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return -10;
+	WavInfo i;
+	int r = parse_wav(f, &i, 1);
+	if (r < 0)
+	{
+		fclose(f);
+		return r;
+	}
+	uint32_t inf = i.data_size / (i.channels * 2);
+	if (!inf || fseek(f, i.data_off, SEEK_SET))
+	{
+		fclose(f);
+		return -11;
+	}
+	size_t ns = (size_t)inf * i.channels;
+	int16_t *in = malloc(ns * 2);
+	if (!in)
+	{
+		fclose(f);
+		return -12;
+	}
+	if (fread(in, 2, ns, f) != ns)
+	{
+		free(in);
+		fclose(f);
+		return -13;
+	}
+	fclose(f);
+	uint32_t of = (uint32_t)(((uint64_t)inf * OUT_RATE + i.rate - 1) / i.rate);
+	int16_t *o = malloc((size_t)of * 4);
+	if (!o)
+	{
+		free(in);
+		return -14;
+	}
+	for (uint32_t x = 0; x < of; x++)
+	{
+		double sp = (double)x * i.rate / OUT_RATE;
+		uint32_t a = (uint32_t)sp;
+		if (a >= inf)
+			a = inf - 1;
+		uint32_t b = a + 1 < inf ? a + 1 : a;
+		double q = sp - a;
+		int16_t l0, r0, l1, r1;
+		if (i.channels == 1)
+		{
+			l0 = r0 = in[a];
+			l1 = r1 = in[b];
+		}
+		else
+		{
+			l0 = in[a * 2];
+			r0 = in[a * 2 + 1];
+			l1 = in[b * 2];
+			r1 = in[b * 2 + 1];
+		}
+		o[x * 2] = clamp16((int32_t)(l0 + (l1 - l0) * q));
+		o[x * 2 + 1] = clamp16((int32_t)(r0 + (r1 - r0) * q));
+	}
+	free(in);
+	*out = o;
+	*outframes = of;
+	return 0;
+}
+static void stream_close_native(Stream *s)
+{
+	if (!s)
+		return;
+
+	if (s->type == STREAM_OGG && s->ogg_open)
+	{
+		ov_clear(&s->ogg);
+		s->ogg_open = 0;
+		s->f = NULL;
+	}
+	else if (s->f)
+	{
+		fclose(s->f);
+		s->f = NULL;
+	}
 }
 
-static uint32_t read_u32_le(FILE *f)
+static int stream_fill_wav(Stream *s, ogg_int64_t frame)
 {
-    uint8_t b[4];
+	if (!s->f || frame < 0 || frame >= s->frames)
+		return -1;
 
-    if (fread(b, 1, 4, f) != 4)
-        return 0;
+	uint32_t want = (uint32_t)(s->frames - frame);
+	if (want > STREAM_CACHE)
+		want = STREAM_CACHE;
 
-    return
-        ((uint32_t)b[0]) |
-        ((uint32_t)b[1] << 8) |
-        ((uint32_t)b[2] << 16) |
-        ((uint32_t)b[3] << 24);
+	if (fseek(
+			s->f,
+			s->info.data_off + (long)((uint64_t)frame * s->channels * 2),
+			SEEK_SET) != 0)
+		return -1;
+
+	if (s->channels == 2)
+	{
+		size_t got = fread(
+			s->cache,
+			sizeof(int16_t),
+			(size_t)want * 2,
+			s->f
+		);
+		s->cache_frames = (uint32_t)(got / 2);
+	}
+	else
+	{
+		size_t got = fread(
+			s->cache,
+			sizeof(int16_t),
+			want,
+			s->f
+		);
+
+		s->cache_frames = (uint32_t)got;
+
+		/* Expand backwards so mono input can be converted in-place. */
+		for (uint32_t i = s->cache_frames; i > 0; i--)
+		{
+			int16_t v = s->cache[i - 1];
+			s->cache[(i - 1) * 2] = v;
+			s->cache[(i - 1) * 2 + 1] = v;
+		}
+	}
+
+	s->cache_start = frame;
+	return s->cache_frames ? 0 : -1;
 }
 
-static int16_t clamp_s16(int32_t value)
+static int stream_fill_ogg(Stream *s, ogg_int64_t frame)
 {
-    if (value > 32767)
-        return 32767;
+	if (!s->ogg_open || frame < 0 || frame >= s->frames)
+		return -1;
 
-    if (value < -32768)
-        return -32768;
+	uint32_t want = (uint32_t)(s->frames - frame);
+	if (want > STREAM_CACHE)
+		want = STREAM_CACHE;
 
-    return (int16_t)value;
+	if (s->ogg_decode_frame != frame)
+	{
+		if (ov_pcm_seek(&s->ogg, frame) < 0)
+			return -1;
+		s->ogg_decode_frame = frame;
+	}
+
+	s->cache_start = frame;
+	s->cache_frames = 0;
+
+	int bitstream = 0;
+
+	while (s->cache_frames < want)
+	{
+		uint32_t remaining = want - s->cache_frames;
+		int bytes_requested = (int)((size_t)remaining * s->channels * sizeof(int16_t));
+
+		if (bytes_requested > (int)sizeof(ogg_decode_buffer))
+			bytes_requested = (int)sizeof(ogg_decode_buffer);
+
+		long bytes = ov_read(
+			&s->ogg,
+			(char *)ogg_decode_buffer,
+			bytes_requested,
+			&bitstream
+		);
+
+		if (bytes == 0)
+			break;
+
+		if (bytes < 0)
+		{
+			if (bytes == OV_HOLE)
+				continue;
+			return -1;
+		}
+
+		uint32_t sample_count = (uint32_t)bytes / sizeof(int16_t);
+		uint32_t decoded_frames = sample_count / s->channels;
+
+		if (!decoded_frames)
+			continue;
+
+		if (decoded_frames > remaining)
+			decoded_frames = remaining;
+
+		uint32_t base = s->cache_frames;
+
+		if (s->channels == 1)
+		{
+			for (uint32_t i = 0; i < decoded_frames; i++)
+			{
+				int16_t v = ogg_decode_buffer[i];
+				s->cache[(base + i) * 2] = v;
+				s->cache[(base + i) * 2 + 1] = v;
+			}
+		}
+		else
+		{
+			memcpy(
+				&s->cache[base * 2],
+				ogg_decode_buffer,
+				(size_t)decoded_frames * 2 * sizeof(int16_t)
+			);
+		}
+
+		s->cache_frames += decoded_frames;
+		s->ogg_decode_frame += decoded_frames;
+	}
+
+	return s->cache_frames ? 0 : -1;
 }
 
-static float clamp_volume(float volume)
+static int stream_fill(Stream *s, ogg_int64_t frame)
 {
-    if (volume < 0.0f)
-        return 0.0f;
+	if (frame < 0 || frame >= s->frames)
+		return -1;
 
-    if (volume > 1.0f)
-        return 1.0f;
+	if (
+		s->cache_frames &&
+		frame >= s->cache_start &&
+		frame < s->cache_start + s->cache_frames
+	)
+		return 0;
 
-    return volume;
+	if (s->type == STREAM_OGG)
+		return stream_fill_ogg(s, frame);
+
+	if (s->type == STREAM_WAV)
+		return stream_fill_wav(s, frame);
+
+	return -1;
 }
 
-static int parse_wav(FILE *f, WavInfo *info)
+static int stream_sample(Stream *s, ogg_int64_t frame, int16_t *l, int16_t *r)
 {
-    char id[4];
+	if (stream_fill(s, frame) < 0)
+		return -1;
 
-    memset(info, 0, sizeof(*info));
+	ogg_int64_t offset = frame - s->cache_start;
+	if (offset < 0 || offset >= s->cache_frames)
+		return -1;
 
-    if (fread(id, 1, 4, f) != 4 || memcmp(id, "RIFF", 4) != 0)
-        return -1;
+	uint32_t idx = (uint32_t)offset;
+	*l = s->cache[idx * 2];
+	*r = s->cache[idx * 2 + 1];
 
-    (void)read_u32_le(f);
-
-    if (fread(id, 1, 4, f) != 4 || memcmp(id, "WAVE", 4) != 0)
-        return -1;
-
-    int found_fmt = 0;
-    int found_data = 0;
-
-    while (!found_fmt || !found_data)
-    {
-        if (fread(id, 1, 4, f) != 4)
-            break;
-
-        uint32_t chunk_size = read_u32_le(f);
-        long chunk_data_pos = ftell(f);
-
-        if (memcmp(id, "fmt ", 4) == 0)
-        {
-            if (chunk_size < 16)
-                return -1;
-
-            info->audio_format = read_u16_le(f);
-            info->channels = read_u16_le(f);
-            info->sample_rate = read_u32_le(f);
-
-            (void)read_u32_le(f); /* byte rate */
-            (void)read_u16_le(f); /* block align */
-
-            info->bits_per_sample = read_u16_le(f);
-
-            found_fmt = 1;
-        }
-        else if (memcmp(id, "data", 4) == 0)
-        {
-            info->data_offset = chunk_data_pos;
-            info->data_size = chunk_size;
-            found_data = 1;
-        }
-
-        long skip_to =
-            chunk_data_pos +
-            (long)chunk_size +
-            (long)(chunk_size & 1u);
-
-        if (fseek(f, skip_to, SEEK_SET) != 0)
-            return -1;
-    }
-
-    if (!found_fmt || !found_data)
-        return -1;
-
-    if (info->audio_format != 1)
-        return -2; /* PCM only */
-
-    if (info->bits_per_sample != 16)
-        return -3;
-
-    if (info->channels != 1 && info->channels != 2)
-        return -4;
-
-    if (info->sample_rate == 0)
-        return -5;
-
-    if (info->data_size == 0 || info->data_size > AUDIO_MAX_WAV_BYTES)
-        return -6;
-
-    return 0;
+	return 0;
 }
 
-static int load_wav_as_48k_stereo(
-    const char *path,
-    int16_t **out_samples,
-    uint32_t *out_frames)
+static void mix_stream(Stream *s, int32_t *L, int32_t *R, float mv)
 {
-    FILE *f = fopen(path, "rb");
+	if (!s->used || !s->playing || s->paused)
+		return;
 
-    if (!f)
-        return -10;
+	if (s->pos >= (double)s->frames)
+	{
+		if (s->loop)
+		{
+			s->pos = 0;
+			s->cache_frames = 0;
+			if (s->type == STREAM_OGG)
+				s->ogg_decode_frame = -1;
+		}
+		else
+		{
+			s->playing = 0;
+			return;
+		}
+	}
 
-    WavInfo info;
+	ogg_int64_t a = (ogg_int64_t)s->pos;
+	ogg_int64_t b = a + 1 < s->frames ? a + 1 : a;
 
-    int parse_result = parse_wav(f, &info);
+	int16_t l0, r0, l1, r1;
 
-    if (parse_result < 0)
-    {
-        fclose(f);
-        return parse_result;
-    }
+	if (stream_sample(s, a, &l0, &r0) < 0)
+	{
+		s->playing = 0;
+		return;
+	}
 
-    uint32_t bytes_per_frame =
-        (uint32_t)info.channels * sizeof(int16_t);
+	if (stream_sample(s, b, &l1, &r1) < 0)
+	{
+		l1 = l0;
+		r1 = r0;
+	}
 
-    if (bytes_per_frame == 0)
-    {
-        fclose(f);
-        return -11;
-    }
+	double q = s->pos - (double)a;
+	float g = s->vol * mv;
 
-    uint32_t input_frames =
-        info.data_size / bytes_per_frame;
+	*L += (int32_t)((l0 + (l1 - l0) * q) * g);
+	*R += (int32_t)((r0 + (r1 - r0) * q) * g);
 
-    if (input_frames == 0)
-    {
-        fclose(f);
-        return -12;
-    }
-
-    if (fseek(f, info.data_offset, SEEK_SET) != 0)
-    {
-        fclose(f);
-        return -13;
-    }
-
-    size_t input_sample_count =
-        (size_t)input_frames * info.channels;
-
-    int16_t *input_samples =
-        malloc(input_sample_count * sizeof(int16_t));
-
-    if (!input_samples)
-    {
-        fclose(f);
-        return -14;
-    }
-
-    size_t expected_bytes =
-        input_sample_count * sizeof(int16_t);
-
-    if (fread(input_samples, 1, expected_bytes, f) != expected_bytes)
-    {
-        free(input_samples);
-        fclose(f);
-        return -15;
-    }
-
-    fclose(f);
-
-    uint64_t output_frames_64 =
-        ((uint64_t)input_frames * AUDIO_OUTPUT_RATE +
-         info.sample_rate - 1) /
-        info.sample_rate;
-
-    if (output_frames_64 == 0 || output_frames_64 > UINT32_MAX)
-    {
-        free(input_samples);
-        return -16;
-    }
-
-    uint32_t output_frames =
-        (uint32_t)output_frames_64;
-
-    if ((size_t)output_frames > SIZE_MAX / (AUDIO_CHANNELS * sizeof(int16_t)))
-    {
-        free(input_samples);
-        return -17;
-    }
-
-    int16_t *output =
-        malloc(
-            (size_t)output_frames *
-            AUDIO_CHANNELS *
-            sizeof(int16_t));
-
-    if (!output)
-    {
-        free(input_samples);
-        return -18;
-    }
-
-    /*
-     * Linear resampling to 48 kHz.
-     * This is plenty for game SFX and avoids forcing a specific WAV rate
-     * in the asset pipeline.
-     */
-    for (uint32_t i = 0; i < output_frames; i++)
-    {
-        double source_position =
-            ((double)i * (double)info.sample_rate) /
-            (double)AUDIO_OUTPUT_RATE;
-
-        uint32_t index0 = (uint32_t)source_position;
-
-        if (index0 >= input_frames)
-            index0 = input_frames - 1;
-
-        uint32_t index1 =
-            index0 + 1 < input_frames
-                ? index0 + 1
-                : index0;
-
-        double fraction =
-            source_position - (double)index0;
-
-        int16_t l0;
-        int16_t r0;
-        int16_t l1;
-        int16_t r1;
-
-        if (info.channels == 1)
-        {
-            l0 = r0 = input_samples[index0];
-            l1 = r1 = input_samples[index1];
-        }
-        else
-        {
-            l0 = input_samples[(size_t)index0 * 2 + 0];
-            r0 = input_samples[(size_t)index0 * 2 + 1];
-            l1 = input_samples[(size_t)index1 * 2 + 0];
-            r1 = input_samples[(size_t)index1 * 2 + 1];
-        }
-
-        double left =
-            (double)l0 +
-            ((double)l1 - (double)l0) * fraction;
-
-        double right =
-            (double)r0 +
-            ((double)r1 - (double)r0) * fraction;
-
-        output[(size_t)i * 2 + 0] =
-            clamp_s16((int32_t)left);
-
-        output[(size_t)i * 2 + 1] =
-            clamp_s16((int32_t)right);
-    }
-
-    free(input_samples);
-
-    *out_samples = output;
-    *out_frames = output_frames;
-
-    return 0;
+	s->pos += (double)s->rate / OUT_RATE;
 }
 
-static void *audio_mixer_thread(void *arg)
+static void *mixthread(void *x)
 {
-    (void)arg;
+	(void)x;
+	int16_t b[GRAIN * 2];
+	while (running)
+	{
+		memset(b, 0, sizeof(b));
+		pthread_mutex_lock(&mutex);
+		float mv = master;
+		for (int f = 0; f < GRAIN; f++)
+		{
+			int32_t L = 0, R = 0;
+			for (int v = 0; v < MAX_VOICES; v++)
+			{
+				Voice *q = &voices[v];
+				if (!q->active)
+					continue;
+				if (q->clip < 0 || q->clip >= MAX_CLIPS || !clips[q->clip].used)
+				{
+					q->active = 0;
+					continue;
+				}
+				Clip *c = &clips[q->clip];
+				if (q->pos >= c->frames)
+				{
+					if (q->loop && c->frames)
+						q->pos = 0;
+					else
+					{
+						q->active = 0;
+						continue;
+					}
+				}
+				size_t si = (size_t)q->pos * 2;
+				float g = q->vol * mv;
+				L += (int32_t)(c->samples[si] * g);
+				R += (int32_t)(c->samples[si + 1] * g);
+				q->pos++;
+			}
+			for (int s = 0; s < MAX_STREAMS; s++)
+				mix_stream(&streams[s], &L, &R, mv);
+			b[f * 2] = clamp16(L);
+			b[f * 2 + 1] = clamp16(R);
+		}
+		pthread_mutex_unlock(&mutex);
+		if (sceAudioOutOutput(port, b) < 0)
+		{
+			running = 0;
+			break;
+		}
+	}
+	return NULL;
+}
+static int ensure(void)
+{
+	if (initialized)
+		return 0;
+	if (!mutex_init)
+	{
+		if (pthread_mutex_init(&mutex, NULL))
+			return -1;
+		mutex_init = 1;
+	}
+	port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, OUT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
+	if (port < 0)
+		return port;
+	memset(clips, 0, sizeof(clips));
+	memset(voices, 0, sizeof(voices));
+	memset(streams, 0, sizeof(streams));
+	for (int i = 0; i < MAX_VOICES; i++)
+		voices[i].clip = -1;
+	master = 1;
+	running = 1;
+	if (pthread_create(&thread, NULL, mixthread, NULL))
+	{
+		sceAudioOutReleasePort(port);
+		port = -1;
+		running = 0;
+		return -2;
+	}
+	initialized = 1;
+	return 0;
+}
+static int freeclip(void)
+{
+	for (int i = 0; i < MAX_CLIPS; i++)
+		if (!clips[i].used)
+			return i;
+	return -1;
+}
+static int freevoice(void)
+{
+	for (int i = 0; i < MAX_VOICES; i++)
+		if (!voices[i].active)
+			return i;
+	return -1;
+}
+static int freestream(void)
+{
+	for (int i = 0; i < MAX_STREAMS; i++)
+		if (!streams[i].used)
+			return i;
+	return -1;
+}
+static JSValue initerr(JSContext *c, int r) { return JS_ThrowInternalError(c, "Unable to initialize PS Vita audio: 0x%08X", (unsigned)r); }
+static int getid(JSContext *c, JSValueConst v, int max, const char *n)
+{
+	int32_t id;
+	if (JS_ToInt32(c, &id, v))
+		return -2;
+	if (id < 0 || id >= max)
+	{
+		JS_ThrowRangeError(c, "Invalid %s id", n);
+		return -2;
+	}
+	return id;
+}
+static int getvol(JSContext *c, JSValueConst v, float *out)
+{
+	double d;
+	if (JS_ToFloat64(c, &d, v))
+		return -1;
+	*out = clampv((float)d);
+	return 0;
+}
+static JSValue loadwav(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "load_wav(path) expects one argument");
+	int ir = ensure();
+	if (ir < 0)
+		return initerr(c, ir);
+	const char *p = JS_ToCString(c, v[0]);
+	if (!p)
+		return JS_EXCEPTION;
+	int16_t *s = NULL;
+	uint32_t f = 0;
+	int r = load_clip(p, &s, &f);
+	JS_FreeCString(c, p);
+	if (r < 0)
+		return JS_ThrowInternalError(c, "Unable to load WAV (error %d)", r);
+	pthread_mutex_lock(&mutex);
+	int id = freeclip();
+	if (id >= 0)
+	{
+		clips[id].used = 1;
+		clips[id].samples = s;
+		clips[id].frames = f;
+	}
+	pthread_mutex_unlock(&mutex);
+	if (id < 0)
+	{
+		free(s);
+		return JS_ThrowInternalError(c, "Audio clip limit reached");
+	}
+	return JS_NewInt32(c, id);
+}
+static JSValue freewav(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "free(clipId) expects one argument");
+	int id = getid(c, v[0], MAX_CLIPS, "clip");
+	if (id < 0)
+		return JS_EXCEPTION;
+	if (!initialized)
+		return JS_UNDEFINED;
+	pthread_mutex_lock(&mutex);
+	for (int i = 0; i < MAX_VOICES; i++)
+		if (voices[i].active && voices[i].clip == id)
+			voices[i].active = 0;
+	if (clips[id].used)
+		free(clips[id].samples);
+	memset(&clips[id], 0, sizeof(clips[id]));
+	pthread_mutex_unlock(&mutex);
+	return JS_UNDEFINED;
+}
+static JSValue play(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a < 1 || a > 3)
+		return JS_ThrowSyntaxError(c, "play(clipId[,volume[,loop]]) expects 1-3 arguments");
+	int ir = ensure();
+	if (ir < 0)
+		return initerr(c, ir);
+	int id = getid(c, v[0], MAX_CLIPS, "clip");
+	if (id < 0)
+		return JS_EXCEPTION;
+	float vol = 1;
+	if (a >= 2 && getvol(c, v[1], &vol) < 0)
+		return JS_EXCEPTION;
+	int loop = a >= 3 ? JS_ToBool(c, v[2]) : 0;
+	if (loop < 0)
+		return JS_EXCEPTION;
+	pthread_mutex_lock(&mutex);
+	if (!clips[id].used)
+	{
+		pthread_mutex_unlock(&mutex);
+		return JS_ThrowRangeError(c, "Invalid or freed clip id");
+	}
+	int q = freevoice();
+	if (q >= 0)
+	{
+		voices[q] = (Voice){1, id, 0, vol, loop ? 1 : 0};
+	}
+	pthread_mutex_unlock(&mutex);
+	return JS_NewInt32(c, q);
+}
+static JSValue stop(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "stop(voiceId) expects one argument");
+	int id = getid(c, v[0], MAX_VOICES, "voice");
+	if (id < 0)
+		return JS_EXCEPTION;
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		voices[id].active = 0;
+		voices[id].clip = -1;
+		voices[id].pos = 0;
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_UNDEFINED;
+}
+static JSValue stopall(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	(void)v;
+	if (a)
+		return JS_ThrowSyntaxError(c, "stop_all() expects no arguments");
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		for (int i = 0; i < MAX_VOICES; i++)
+			voices[i].active = 0;
+		for (int i = 0; i < MAX_STREAMS; i++)
+			streams[i].playing = 0;
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_UNDEFINED;
+}
+static JSValue isplaying(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "is_playing(voiceId) expects one argument");
+	int id = getid(c, v[0], MAX_VOICES, "voice");
+	if (id < 0)
+		return JS_FALSE;
+	int b = 0;
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		b = voices[id].active;
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_NewBool(c, b);
+}
+static JSValue voicevol(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a != 2)
+		return JS_ThrowSyntaxError(c, "set_voice_volume(voiceId,volume) expects two arguments");
+	int id = getid(c, v[0], MAX_VOICES, "voice");
+	if (id < 0)
+		return JS_EXCEPTION;
+	float q;
+	if (getvol(c, v[1], &q) < 0)
+		return JS_EXCEPTION;
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		voices[id].vol = q;
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_UNDEFINED;
+}
+static JSValue masterm(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "set_master_volume(volume) expects one argument");
+	float q;
+	if (getvol(c, v[0], &q) < 0)
+		return JS_EXCEPTION;
+	int r = ensure();
+	if (r < 0)
+		return initerr(c, r);
+	pthread_mutex_lock(&mutex);
+	master = q;
+	pthread_mutex_unlock(&mutex);
+	return JS_UNDEFINED;
+}
+static JSValue getmaster(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
+	(void)v;
+	if (a)
+		return JS_ThrowSyntaxError(c, "get_master_volume() expects no arguments");
+	float q = master;
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		q = master;
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_NewFloat64(c, q);
+}
+static JSValue openstream(JSContext *c, JSValueConst t, int a, JSValueConst *v)
+{
+	(void)t;
 
-    int16_t mix_buffer[
-        AUDIO_GRAIN_FRAMES *
-        AUDIO_CHANNELS
-    ];
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "open_stream(path) expects one argument");
 
-    while (audio_running)
-    {
-        memset(
-            mix_buffer,
-            0,
-            sizeof(mix_buffer));
+	int ir = ensure();
+	if (ir < 0)
+		return initerr(c, ir);
 
-        pthread_mutex_lock(&audio_mutex);
+	const char *p = JS_ToCString(c, v[0]);
+	if (!p)
+		return JS_EXCEPTION;
 
-        float current_master = master_volume;
+	FILE *f = fopen(p, "rb");
 
-        for (int frame = 0; frame < AUDIO_GRAIN_FRAMES; frame++)
-        {
-            int32_t mixed_left = 0;
-            int32_t mixed_right = 0;
+	if (!f)
+	{
+		JS_FreeCString(c, p);
+		return JS_ThrowInternalError(c, "Unable to open audio stream");
+	}
 
-            for (int v = 0; v < AUDIO_MAX_VOICES; v++)
-            {
-                AudioVoice *voice = &voices[v];
+	uint8_t magic[4] = {0};
 
-                if (!voice->active)
-                    continue;
+	if (fread(magic, 1, sizeof(magic), f) != sizeof(magic))
+	{
+		fclose(f);
+		JS_FreeCString(c, p);
+		return JS_ThrowInternalError(c, "Unable to read audio stream header");
+	}
 
-                if (
-                    voice->clip_id < 0 ||
-                    voice->clip_id >= AUDIO_MAX_CLIPS ||
-                    !clips[voice->clip_id].used)
-                {
-                    voice->active = 0;
-                    continue;
-                }
+	rewind(f);
 
-                AudioClip *clip =
-                    &clips[voice->clip_id];
+	Stream candidate;
+	memset(&candidate, 0, sizeof(candidate));
 
-                if (voice->position >= clip->frames)
-                {
-                    if (voice->loop && clip->frames > 0)
-                    {
-                        voice->position = 0;
-                    }
-                    else
-                    {
-                        voice->active = 0;
-                        continue;
-                    }
-                }
+	candidate.used = 1;
+	candidate.vol = 1.0f;
+	candidate.ogg_decode_frame = -1;
 
-                size_t sample_index =
-                    (size_t)voice->position * 2;
+	if (!memcmp(magic, "OggS", 4))
+	{
+		int r = ov_open(f, &candidate.ogg, NULL, 0);
 
-                float gain =
-                    voice->volume *
-                    current_master;
+		if (r < 0)
+		{
+			fclose(f);
+			JS_FreeCString(c, p);
+			return JS_ThrowInternalError(c, "Unable to open OGG/Vorbis stream (error %d)", r);
+		}
 
-                mixed_left +=
-                    (int32_t)(
-                        (float)clip->samples[sample_index + 0] *
-                        gain);
+		candidate.type = STREAM_OGG;
+		candidate.ogg_open = 1;
+		candidate.f = NULL;
 
-                mixed_right +=
-                    (int32_t)(
-                        (float)clip->samples[sample_index + 1] *
-                        gain);
+		vorbis_info *vi = ov_info(&candidate.ogg, -1);
 
-                voice->position++;
-            }
+		if (
+			!vi ||
+			(vi->channels != 1 && vi->channels != 2) ||
+			vi->rate <= 0
+		)
+		{
+			ov_clear(&candidate.ogg);
+			JS_FreeCString(c, p);
+			return JS_ThrowInternalError(
+				c,
+				"Unsupported OGG/Vorbis stream; only mono/stereo is supported"
+			);
+		}
 
-            mix_buffer[(size_t)frame * 2 + 0] =
-                clamp_s16(mixed_left);
+		ogg_int64_t total = ov_pcm_total(&candidate.ogg, -1);
 
-            mix_buffer[(size_t)frame * 2 + 1] =
-                clamp_s16(mixed_right);
-        }
+		if (total <= 0)
+		{
+			ov_clear(&candidate.ogg);
+			JS_FreeCString(c, p);
+			return JS_ThrowInternalError(c, "Unable to determine OGG/Vorbis stream length");
+		}
 
-        pthread_mutex_unlock(&audio_mutex);
+		candidate.rate = (uint32_t)vi->rate;
+		candidate.channels = (uint16_t)vi->channels;
+		candidate.frames = total;
+	}
+	else if (!memcmp(magic, "RIFF", 4))
+	{
+		WavInfo i;
+		int r = parse_wav(f, &i, 0);
 
-        /*
-         * Blocking by design, but only on the audio thread.
-         * One call outputs exactly AUDIO_GRAIN_FRAMES stereo frames.
-         */
-        int result =
-            sceAudioOutOutput(
-                audio_port,
-                mix_buffer);
+		if (r < 0)
+		{
+			fclose(f);
+			JS_FreeCString(c, p);
+			return JS_ThrowInternalError(c, "Unsupported WAV stream (error %d)", r);
+		}
 
-        if (result < 0)
-        {
-            /*
-             * Avoid a hot loop if the output port becomes invalid.
-             * The process can still terminate cleanly via Audio.term().
-             */
-            audio_running = 0;
-            break;
-        }
-    }
+		candidate.type = STREAM_WAV;
+		candidate.f = f;
+		candidate.info = i;
+		candidate.rate = i.rate;
+		candidate.channels = i.channels;
+		candidate.frames = (ogg_int64_t)i.data_size / (i.channels * 2);
+	}
+	else
+	{
+		fclose(f);
+		JS_FreeCString(c, p);
+		return JS_ThrowInternalError(
+			c,
+			"Unsupported stream format; expected PCM WAV or OGG/Vorbis"
+		);
+	}
 
-    return NULL;
+	JS_FreeCString(c, p);
+
+	pthread_mutex_lock(&mutex);
+	int id = freestream();
+
+	if (id >= 0)
+		streams[id] = candidate;
+
+	pthread_mutex_unlock(&mutex);
+
+	if (id < 0)
+	{
+		stream_close_native(&candidate);
+		return JS_ThrowInternalError(c, "Audio stream limit reached (%d)", MAX_STREAMS);
+	}
+
+	return JS_NewInt32(c, id);
 }
 
-static int audio_ensure_initialized(void)
+static JSValue closestream(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    if (audio_initialized)
-        return 0;
-
-    if (!audio_mutex_initialized)
-    {
-        if (pthread_mutex_init(&audio_mutex, NULL) != 0)
-            return -1;
-
-        audio_mutex_initialized = 1;
-    }
-
-    audio_port =
-        sceAudioOutOpenPort(
-            SCE_AUDIO_OUT_PORT_TYPE_MAIN,
-            AUDIO_GRAIN_FRAMES,
-            AUDIO_OUTPUT_RATE,
-            SCE_AUDIO_OUT_MODE_STEREO);
-
-    if (audio_port < 0)
-        return audio_port;
-
-    memset(clips, 0, sizeof(clips));
-    memset(voices, 0, sizeof(voices));
-
-    for (int i = 0; i < AUDIO_MAX_VOICES; i++)
-        voices[i].clip_id = -1;
-
-    master_volume = 1.0f;
-    audio_running = 1;
-
-    int thread_result =
-        pthread_create(
-            &audio_thread,
-            NULL,
-            audio_mixer_thread,
-            NULL);
-
-    if (thread_result != 0)
-    {
-        audio_running = 0;
-
-        sceAudioOutReleasePort(audio_port);
-        audio_port = -1;
-
-        return -2;
-    }
-
-    audio_initialized = 1;
-
-    return 0;
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "close_stream(streamId) expects one argument");
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_EXCEPTION;
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		stream_close_native(&streams[id]);
+		memset(&streams[id], 0, sizeof(streams[id]));
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_UNDEFINED;
 }
-
-static int find_free_clip(void)
+static JSValue playstream(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    for (int i = 0; i < AUDIO_MAX_CLIPS; i++)
-    {
-        if (!clips[i].used)
-            return i;
-    }
-
-    return -1;
+	(void)t;
+	if (a < 1 || a > 3)
+		return JS_ThrowSyntaxError(c, "play_stream(streamId[,volume[,loop]]) expects 1-3 arguments");
+	if (!initialized)
+		return JS_ThrowInternalError(c, "Audio is not initialized; open a stream first");
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_EXCEPTION;
+	float vol = 1;
+	if (a >= 2 && getvol(c, v[1], &vol) < 0)
+		return JS_EXCEPTION;
+	int loop = a >= 3 ? JS_ToBool(c, v[2]) : 0;
+	if (loop < 0)
+		return JS_EXCEPTION;
+	pthread_mutex_lock(&mutex);
+	if (!streams[id].used)
+	{
+		pthread_mutex_unlock(&mutex);
+		return JS_ThrowRangeError(c, "Invalid stream id");
+	}
+	streams[id].playing = 1;
+	streams[id].paused = 0;
+	streams[id].loop = loop ? 1 : 0;
+	streams[id].vol = vol;
+	pthread_mutex_unlock(&mutex);
+	return JS_UNDEFINED;
 }
-
-static int find_free_voice(void)
+static JSValue streamcmd(JSContext *c, int a, JSValueConst *v, int cmd)
 {
-    for (int i = 0; i < AUDIO_MAX_VOICES; i++)
-    {
-        if (!voices[i].active)
-            return i;
-    }
-
-    return -1;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "stream command expects one streamId");
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_EXCEPTION;
+	if (initialized)
+	{
+		pthread_mutex_lock(&mutex);
+		Stream *s = &streams[id];
+		if (cmd == 0)
+			s->paused = 1;
+		else if (cmd == 1)
+			s->paused = 0;
+		else if (cmd == 2)
+		{
+			s->playing = 0;
+			s->paused = 0;
+			s->pos = 0;
+			s->cache_frames = 0;
+			if (s->type == STREAM_OGG)
+				s->ogg_decode_frame = -1;
+		}
+		pthread_mutex_unlock(&mutex);
+	}
+	return JS_UNDEFINED;
 }
-
-static JSValue vitajs_audio_load_wav(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue pausestream(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-
-    if (argc != 1)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "load_wav(path: string) expects one argument");
-
-    int init_result = audio_ensure_initialized();
-
-    if (init_result < 0)
-        return JS_ThrowInternalError(
-            ctx,
-            "Unable to initialize PS Vita audio: 0x%08X",
-            (unsigned int)init_result);
-
-    const char *path =
-        JS_ToCString(ctx, argv[0]);
-
-    if (!path)
-        return JS_EXCEPTION;
-
-    int16_t *samples = NULL;
-    uint32_t frames = 0;
-
-    int result =
-        load_wav_as_48k_stereo(
-            path,
-            &samples,
-            &frames);
-
-    JS_FreeCString(ctx, path);
-
-    if (result < 0)
-    {
-        return JS_ThrowInternalError(
-            ctx,
-            "Unable to load WAV file (error %d). "
-            "Expected RIFF/WAVE PCM 16-bit mono or stereo.",
-            result);
-    }
-
-    pthread_mutex_lock(&audio_mutex);
-
-    int clip_id = find_free_clip();
-
-    if (clip_id >= 0)
-    {
-        clips[clip_id].used = 1;
-        clips[clip_id].samples = samples;
-        clips[clip_id].frames = frames;
-    }
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    if (clip_id < 0)
-    {
-        free(samples);
-
-        return JS_ThrowInternalError(
-            ctx,
-            "Audio clip limit reached (%d)",
-            AUDIO_MAX_CLIPS);
-    }
-
-    return JS_NewInt32(ctx, clip_id);
+	(void)t;
+	return streamcmd(c, a, v, 0);
 }
-
-static JSValue vitajs_audio_free(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue resumestream(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-
-    if (argc != 1)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "free(clipId) expects one argument");
-
-    int32_t clip_id;
-
-    if (JS_ToInt32(ctx, &clip_id, argv[0]))
-        return JS_EXCEPTION;
-
-    if (
-        clip_id < 0 ||
-        clip_id >= AUDIO_MAX_CLIPS)
-    {
-        return JS_ThrowRangeError(
-            ctx,
-            "Invalid audio clip id");
-    }
-
-    if (!audio_initialized)
-        return JS_UNDEFINED;
-
-    pthread_mutex_lock(&audio_mutex);
-
-    if (clips[clip_id].used)
-    {
-        for (int i = 0; i < AUDIO_MAX_VOICES; i++)
-        {
-            if (
-                voices[i].active &&
-                voices[i].clip_id == clip_id)
-            {
-                voices[i].active = 0;
-                voices[i].clip_id = -1;
-                voices[i].position = 0;
-            }
-        }
-
-        free(clips[clip_id].samples);
-
-        clips[clip_id].samples = NULL;
-        clips[clip_id].frames = 0;
-        clips[clip_id].used = 0;
-    }
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    return JS_UNDEFINED;
+	(void)t;
+	return streamcmd(c, a, v, 1);
 }
-
-static JSValue vitajs_audio_play(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue stopstream(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-
-    if (argc < 1 || argc > 3)
-    {
-        return JS_ThrowSyntaxError(
-            ctx,
-            "play(clipId[, volume[, loop]]) expects 1-3 arguments");
-    }
-
-    int init_result = audio_ensure_initialized();
-
-    if (init_result < 0)
-        return JS_ThrowInternalError(
-            ctx,
-            "Unable to initialize PS Vita audio: 0x%08X",
-            (unsigned int)init_result);
-
-    int32_t clip_id;
-
-    if (JS_ToInt32(ctx, &clip_id, argv[0]))
-        return JS_EXCEPTION;
-
-    float volume = 1.0f;
-    int loop = 0;
-
-    if (argc >= 2)
-    {
-        if (JS_ToFloat32(ctx, &volume, argv[1]))
-            return JS_EXCEPTION;
-
-        volume = clamp_volume(volume);
-    }
-
-    if (argc >= 3)
-    {
-        loop = JS_ToBool(ctx, argv[2]);
-
-        if (loop < 0)
-            return JS_EXCEPTION;
-    }
-
-    pthread_mutex_lock(&audio_mutex);
-
-    if (
-        clip_id < 0 ||
-        clip_id >= AUDIO_MAX_CLIPS ||
-        !clips[clip_id].used)
-    {
-        pthread_mutex_unlock(&audio_mutex);
-
-        return JS_ThrowRangeError(
-            ctx,
-            "Invalid or freed audio clip id");
-    }
-
-    int voice_id = find_free_voice();
-
-    if (voice_id >= 0)
-    {
-        voices[voice_id].active = 1;
-        voices[voice_id].clip_id = clip_id;
-        voices[voice_id].position = 0;
-        voices[voice_id].volume = volume;
-        voices[voice_id].loop = loop ? 1 : 0;
-    }
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    /*
-     * -1 means all 16 mixer voices are currently in use.
-     * This is intentionally non-throwing so a busy sound effect does
-     * not crash normal game logic.
-     */
-    return JS_NewInt32(ctx, voice_id);
+	(void)t;
+	return streamcmd(c, a, v, 2);
 }
-
-static JSValue vitajs_audio_stop(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue streamplaying(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-
-    if (argc != 1)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "stop(voiceId) expects one argument");
-
-    int32_t voice_id;
-
-    if (JS_ToInt32(ctx, &voice_id, argv[0]))
-        return JS_EXCEPTION;
-
-    if (
-        voice_id < 0 ||
-        voice_id >= AUDIO_MAX_VOICES)
-    {
-        return JS_ThrowRangeError(
-            ctx,
-            "Invalid audio voice id");
-    }
-
-    if (!audio_initialized)
-        return JS_UNDEFINED;
-
-    pthread_mutex_lock(&audio_mutex);
-
-    voices[voice_id].active = 0;
-    voices[voice_id].clip_id = -1;
-    voices[voice_id].position = 0;
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    return JS_UNDEFINED;
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "is_stream_playing(streamId) expects one argument");
+	if (!initialized)
+		return JS_FALSE;
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_FALSE;
+	pthread_mutex_lock(&mutex);
+	int b = streams[id].used && streams[id].playing && !streams[id].paused;
+	pthread_mutex_unlock(&mutex);
+	return JS_NewBool(c, b);
 }
-
-static JSValue vitajs_audio_stop_all(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue streamvol(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-    (void)argv;
-
-    if (argc != 0)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "stop_all() expects no arguments");
-
-    if (!audio_initialized)
-        return JS_UNDEFINED;
-
-    pthread_mutex_lock(&audio_mutex);
-
-    for (int i = 0; i < AUDIO_MAX_VOICES; i++)
-    {
-        voices[i].active = 0;
-        voices[i].clip_id = -1;
-        voices[i].position = 0;
-    }
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    return JS_UNDEFINED;
+	(void)t;
+	if (a != 2)
+		return JS_ThrowSyntaxError(c, "set_stream_volume(streamId,volume) expects two arguments");
+	if (!initialized)
+		return JS_ThrowInternalError(c, "Audio is not initialized; open a stream first");
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_EXCEPTION;
+	float q;
+	if (getvol(c, v[1], &q) < 0)
+		return JS_EXCEPTION;
+	pthread_mutex_lock(&mutex);
+	streams[id].vol = q;
+	pthread_mutex_unlock(&mutex);
+	return JS_UNDEFINED;
 }
-
-static JSValue vitajs_audio_is_playing(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue streamseek(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-
-    if (argc != 1)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "is_playing(voiceId) expects one argument");
-
-    int32_t voice_id;
-
-    if (JS_ToInt32(ctx, &voice_id, argv[0]))
-        return JS_EXCEPTION;
-
-    if (
-        voice_id < 0 ||
-        voice_id >= AUDIO_MAX_VOICES)
-    {
-        return JS_FALSE;
-    }
-
-    if (!audio_initialized)
-        return JS_FALSE;
-
-    pthread_mutex_lock(&audio_mutex);
-
-    int active =
-        voices[voice_id].active;
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    return JS_NewBool(ctx, active);
+	(void)t;
+	if (a != 2)
+		return JS_ThrowSyntaxError(c, "seek_stream(streamId,seconds) expects two arguments");
+	if (!initialized)
+		return JS_ThrowInternalError(c, "Audio is not initialized; open a stream first");
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_EXCEPTION;
+	double sec;
+	if (JS_ToFloat64(c, &sec, v[1]))
+		return JS_EXCEPTION;
+	if (sec < 0)
+		sec = 0;
+	pthread_mutex_lock(&mutex);
+	Stream *s = &streams[id];
+	double p = sec * s->rate;
+	if (p > (double)s->frames)
+		p = (double)s->frames;
+	s->pos = p;
+	s->cache_frames = 0;
+	if (s->type == STREAM_OGG)
+		s->ogg_decode_frame = -1;
+	pthread_mutex_unlock(&mutex);
+	return JS_UNDEFINED;
 }
-
-static JSValue vitajs_audio_set_voice_volume(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue streamtime(JSContext *c, JSValueConst t, int a, JSValueConst *v, int duration)
 {
-    (void)this_val;
-
-    if (argc != 2)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "set_voice_volume(voiceId, volume) expects two arguments");
-
-    int32_t voice_id;
-    float volume;
-
-    if (JS_ToInt32(ctx, &voice_id, argv[0]))
-        return JS_EXCEPTION;
-
-    if (JS_ToFloat32(ctx, &volume, argv[1]))
-        return JS_EXCEPTION;
-
-    if (
-        voice_id < 0 ||
-        voice_id >= AUDIO_MAX_VOICES)
-    {
-        return JS_ThrowRangeError(
-            ctx,
-            "Invalid audio voice id");
-    }
-
-    if (!audio_initialized)
-        return JS_UNDEFINED;
-
-    pthread_mutex_lock(&audio_mutex);
-
-    voices[voice_id].volume =
-        clamp_volume(volume);
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    return JS_UNDEFINED;
+	(void)t;
+	if (a != 1)
+		return JS_ThrowSyntaxError(c, "stream getter expects one streamId");
+	if (!initialized)
+		return JS_NewFloat64(c, 0);
+	int id = getid(c, v[0], MAX_STREAMS, "stream");
+	if (id < 0)
+		return JS_EXCEPTION;
+	pthread_mutex_lock(&mutex);
+	Stream *s = &streams[id];
+	double q = s->rate
+		? (duration ? (double)s->frames / s->rate : s->pos / s->rate)
+		: 0;
+	pthread_mutex_unlock(&mutex);
+	return JS_NewFloat64(c, q);
 }
-
-static JSValue vitajs_audio_set_master_volume(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue streampos(JSContext *c, JSValueConst t, int a, JSValueConst *v) { return streamtime(c, t, a, v, 0); }
+static JSValue streamdur(JSContext *c, JSValueConst t, int a, JSValueConst *v) { return streamtime(c, t, a, v, 1); }
+static void shutdown(void)
 {
-    (void)this_val;
-
-    if (argc != 1)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "set_master_volume(volume) expects one argument");
-
-    float volume;
-
-    if (JS_ToFloat32(ctx, &volume, argv[0]))
-        return JS_EXCEPTION;
-
-    if (!audio_initialized)
-    {
-        /*
-         * Initialize so the value belongs to a live mixer lifecycle.
-         */
-        int init_result = audio_ensure_initialized();
-
-        if (init_result < 0)
-            return JS_ThrowInternalError(
-                ctx,
-                "Unable to initialize PS Vita audio: 0x%08X",
-                (unsigned int)init_result);
-    }
-
-    pthread_mutex_lock(&audio_mutex);
-
-    master_volume =
-        clamp_volume(volume);
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    return JS_UNDEFINED;
+	if (!initialized)
+		return;
+	running = 0;
+	pthread_join(thread, NULL);
+	pthread_mutex_lock(&mutex);
+	for (int i = 0; i < MAX_CLIPS; i++)
+		if (clips[i].used)
+			free(clips[i].samples);
+	for (int i = 0; i < MAX_STREAMS; i++)
+		if (streams[i].used)
+			stream_close_native(&streams[i]);
+	memset(clips, 0, sizeof(clips));
+	memset(voices, 0, sizeof(voices));
+	memset(streams, 0, sizeof(streams));
+	pthread_mutex_unlock(&mutex);
+	if (port >= 0)
+		sceAudioOutReleasePort(port);
+	port = -1;
+	initialized = 0;
+	if (mutex_init)
+	{
+		pthread_mutex_destroy(&mutex);
+		mutex_init = 0;
+	}
 }
-
-static JSValue vitajs_audio_get_master_volume(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
+static JSValue term(JSContext *c, JSValueConst t, int a, JSValueConst *v)
 {
-    (void)this_val;
-    (void)argv;
-
-    if (argc != 0)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "get_master_volume() expects no arguments");
-
-    float volume = master_volume;
-
-    if (audio_initialized)
-    {
-        pthread_mutex_lock(&audio_mutex);
-        volume = master_volume;
-        pthread_mutex_unlock(&audio_mutex);
-    }
-
-    return JS_NewFloat32(ctx, volume);
+	(void)t;
+	(void)v;
+	if (a)
+		return JS_ThrowSyntaxError(c, "term() expects no arguments");
+	shutdown();
+	return JS_UNDEFINED;
 }
-
-static void audio_shutdown_native(void)
-{
-    if (!audio_initialized)
-        return;
-
-    audio_running = 0;
-
-    /*
-     * sceAudioOutOutput blocks for roughly one grain, so join waits only
-     * for the current audio buffer to finish.
-     */
-    pthread_join(audio_thread, NULL);
-
-    pthread_mutex_lock(&audio_mutex);
-
-    for (int i = 0; i < AUDIO_MAX_VOICES; i++)
-    {
-        voices[i].active = 0;
-        voices[i].clip_id = -1;
-        voices[i].position = 0;
-    }
-
-    for (int i = 0; i < AUDIO_MAX_CLIPS; i++)
-    {
-        if (clips[i].used)
-        {
-            free(clips[i].samples);
-
-            clips[i].samples = NULL;
-            clips[i].frames = 0;
-            clips[i].used = 0;
-        }
-    }
-
-    pthread_mutex_unlock(&audio_mutex);
-
-    if (audio_port >= 0)
-    {
-        sceAudioOutReleasePort(audio_port);
-        audio_port = -1;
-    }
-
-    audio_initialized = 0;
-
-    if (audio_mutex_initialized)
-    {
-        pthread_mutex_destroy(&audio_mutex);
-        audio_mutex_initialized = 0;
-    }
-}
-
-static JSValue vitajs_audio_term(
-    JSContext *ctx,
-    JSValue this_val,
-    int argc,
-    JSValueConst *argv)
-{
-    (void)ctx;
-    (void)this_val;
-    (void)argv;
-
-    if (argc != 0)
-        return JS_ThrowSyntaxError(
-            ctx,
-            "term() expects no arguments");
-
-    audio_shutdown_native();
-
-    return JS_UNDEFINED;
-}
-
-static const JSCFunctionListEntry module_funcs[] = {
-    JS_CFUNC_DEF("load_wav", 1, vitajs_audio_load_wav),
-    JS_CFUNC_DEF("free", 1, vitajs_audio_free),
-    JS_CFUNC_DEF("play", 3, vitajs_audio_play),
-    JS_CFUNC_DEF("stop", 1, vitajs_audio_stop),
-    JS_CFUNC_DEF("stop_all", 0, vitajs_audio_stop_all),
-    JS_CFUNC_DEF("is_playing", 1, vitajs_audio_is_playing),
-    JS_CFUNC_DEF("set_voice_volume", 2, vitajs_audio_set_voice_volume),
-    JS_CFUNC_DEF("set_master_volume", 1, vitajs_audio_set_master_volume),
-    JS_CFUNC_DEF("get_master_volume", 0, vitajs_audio_get_master_volume),
-    JS_CFUNC_DEF("term", 0, vitajs_audio_term),
+static const JSCFunctionListEntry funcs[] = {
+	JS_CFUNC_DEF("load_wav", 1, loadwav), 
+	JS_CFUNC_DEF("free", 1, freewav),
+	JS_CFUNC_DEF("play", 3, play),
+	JS_CFUNC_DEF("stop", 1, stop),
+	JS_CFUNC_DEF("stop_all", 0, stopall),
+	JS_CFUNC_DEF("is_playing", 1, isplaying),
+	JS_CFUNC_DEF("set_voice_volume", 2, voicevol),
+	JS_CFUNC_DEF("set_master_volume", 1, masterm),
+	JS_CFUNC_DEF("get_master_volume", 0, getmaster),
+	JS_CFUNC_DEF("open_stream", 1, openstream),
+	JS_CFUNC_DEF("close_stream", 1, closestream),
+	JS_CFUNC_DEF("play_stream", 3, playstream),
+	JS_CFUNC_DEF("pause_stream", 1, pausestream),
+	JS_CFUNC_DEF("resume_stream", 1, resumestream),
+	JS_CFUNC_DEF("stop_stream", 1, stopstream),
+	JS_CFUNC_DEF("is_stream_playing", 1, streamplaying),
+	JS_CFUNC_DEF("set_stream_volume", 2, streamvol),
+	JS_CFUNC_DEF("seek_stream", 2, streamseek),
+	JS_CFUNC_DEF("get_stream_position", 1, streampos),
+	JS_CFUNC_DEF("get_stream_duration", 1, streamdur),
+	JS_CFUNC_DEF("term", 0, term)
 };
-
-static int module_init(JSContext *ctx, JSModuleDef *m)
-{
-    return JS_SetModuleExportList(
-        ctx,
-        m,
-        module_funcs,
-        countof(module_funcs));
-}
-
-JSModuleDef *vitajs_audio_init(JSContext *ctx)
-{
-    return vitajs_push_module(
-        ctx,
-        module_init,
-        module_funcs,
-        countof(module_funcs),
-        "Audio");
-}
+static int initmod(JSContext *c, JSModuleDef *m) { return JS_SetModuleExportList(c, m, funcs, countof(funcs)); }
+JSModuleDef *vitajs_audio_init(JSContext *c) { return vitajs_push_module(c, initmod, funcs, countof(funcs), "Audio"); }

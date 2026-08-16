@@ -7,6 +7,7 @@ type VitaRGBA = number;
 
 type VitaAudioClipId = number;
 type VitaAudioVoiceId = number;
+type VitaAudioStreamId = number;
 
 type VitaFileDescriptor = number;
 type VitaTimerHandle = unknown;
@@ -28,13 +29,22 @@ interface VitaNetResponse {
     /** true when status is in the 200-299 range. */
     ok: boolean;
 
-    /** Full response body as text. */
+    /** Full response body returned synchronously by SceHttp. */
     body: string;
 }
 
 interface VitaPadState {
+    /** Controller port used for this sample. */
+    port: number;
+
     /** Raw button bitmask. */
     btns: number;
+
+    /** Alias of btns. */
+    buttons: number;
+
+    /** Native sample timestamp. */
+    timestamp: number;
 
     /** Left analog X. */
     lx: number;
@@ -112,6 +122,24 @@ interface VitaSystemAPI {
      */
     loadELF(path: string, args?: string[]): never;
 
+    /** Full app0:/sce_sys/param.sfo as a JS object (all SFO keys). */
+    readonly manifest: Record<string, string | number | ArrayBuffer>;
+    readonly titleId: string;
+    readonly title: string;
+    readonly shortTitle: string;
+    readonly version: string;
+    readonly category: string;
+    readonly contentId: string;
+
+    /** BCP-47-ish Vita system language, e.g. "pl-PL". */
+    readonly language: string;
+    readonly languageId: number;
+
+    /** "PS Vita" or "PS Vita TV". Does not distinguish PCH-1000 vs PCH-2000. */
+    readonly model: string;
+    readonly modelId: number;
+    readonly isPSTV: boolean;
+
     readonly boot_path: string;
 
     readonly FREAD: number;
@@ -132,23 +160,20 @@ interface VitaSystemAPI {
  * ========================================================================== */
 
 interface VitaPadsAPI {
-    /** Read current buttons and analog state. */
+    /** Preferred API: one native controller poll returning buttons + both sticks. Ports 0..5. */
+    read(port?: number): VitaPadState;
+
+    /** Backwards-compatible alias of read(). */
     analog(port?: number): VitaPadState;
 
     /** Check whether a button mask is pressed. */
-    check(button: number): boolean;
+    check(button: number, port?: number): boolean;
 
-    /**
-     * Upstream implementation may be incomplete.
-     * @deprecated
-     */
     rumble(small: number, large: number, port?: number): void;
 
-    /**
-     * Upstream implementation may be incomplete.
-     * @deprecated
-     */
     battery_info(port?: number): number;
+    setSamplingMode(mode: number): number;
+    getSamplingMode(): number;
 
     readonly SELECT: number;
     readonly START: number;
@@ -181,6 +206,27 @@ interface VitaPadsAPI {
     readonly TYPE_PSTV: number;
     readonly TYPE_DUALSHOCK3: number;
     readonly TYPE_DUALSHOCK4: number;
+}
+
+
+/* ==========================================================================
+ * Touch
+ * ========================================================================== */
+interface VitaTouchPoint { id: number; x: number; y: number; force: number; info: number; }
+interface VitaTouchData { port: number; timestamp: number; status: number; count: number; touches: VitaTouchPoint[]; }
+interface VitaTouchPanelInfo { minAaX:number; minAaY:number; maxAaX:number; maxAaY:number; minDispX:number; minDispY:number; maxDispX:number; maxDispY:number; minForce:number; maxForce:number; }
+interface VitaTouchAPI {
+    peek(port?: number): VitaTouchData;
+    read(port?: number): VitaTouchData;
+    front(): VitaTouchData;
+    back(): VitaTouchData;
+    getPanelInfo(port: number): VitaTouchPanelInfo;
+    setSampling(port: number, enabled: boolean): void;
+    getSampling(port: number): boolean;
+    setForce(port: number, enabled: boolean): void;
+    readonly FRONT: number;
+    readonly BACK: number;
+    readonly INFO_HIDE_UPPER_LAYER: number;
 }
 
 /* ==========================================================================
@@ -566,24 +612,26 @@ interface VitaAudioAPI {
 
     get_master_volume(): number;
 
-    /** Shut down audio thread and free all clips. */
+    /** Open a PCM16 mono/stereo WAV without loading the whole file into RAM. */
+    open_stream(path: string): VitaAudioStreamId;
+    close_stream(streamId: VitaAudioStreamId): void;
+    play_stream(streamId: VitaAudioStreamId, volume?: number, loop?: boolean): void;
+    pause_stream(streamId: VitaAudioStreamId): void;
+    resume_stream(streamId: VitaAudioStreamId): void;
+    stop_stream(streamId: VitaAudioStreamId): void;
+    is_stream_playing(streamId: VitaAudioStreamId): boolean;
+    set_stream_volume(streamId: VitaAudioStreamId, volume: number): void;
+    seek_stream(streamId: VitaAudioStreamId, seconds: number): void;
+    get_stream_position(streamId: VitaAudioStreamId): number;
+    get_stream_duration(streamId: VitaAudioStreamId): number;
+
+    /** Shut down audio thread and free all clips/streams. */
     term(): void;
 }
 
 /* ==========================================================================
- * Net - synchronous module
+ * Net
  * ========================================================================== */
-
-interface VitaNetResponse {
-    /** HTTP status code, e.g. 200, 404, 500. */
-    status: number;
-
-    /** true when status is in the 200-299 range. */
-    ok: boolean;
-
-    /** Full response body as text. */
-    body: string;
-}
 
 type VitaHttpMethod =
     | "GET"
@@ -597,12 +645,10 @@ interface VitaNetAPI {
     /**
      * Perform a synchronous HTTP request.
      *
-     * NOTE: this blocks the JS/game loop until the request completes.
-     *
-     * @param method HTTP method
-     * @param url Request URL
-     * @param body Optional request body
-     * @param contentType Optional Content-Type header
+     * @param method HTTP method.
+     * @param url Request URL.
+     * @param body Optional request body.
+     * @param contentType Optional Content-Type header used when body is present.
      */
     request(
         method: VitaHttpMethod,
@@ -614,7 +660,9 @@ interface VitaNetAPI {
     /**
      * Perform a synchronous HTTP GET request.
      *
-     * NOTE: this blocks the JS/game loop until the request completes.
+     * Example:
+     *   const res = Net.get("http://192.168.1.30:8080");
+     *   console.log(res.body);
      */
     get(url: string): VitaNetResponse;
 
@@ -622,19 +670,17 @@ interface VitaNetAPI {
      * Perform a synchronous HTTP POST request.
      *
      * Content-Type defaults to application/json.
-     *
-     * NOTE: this blocks the JS/game loop until the request completes.
      */
     post(
         url: string,
         body: string,
-        contentType?: string
+        contentType?: string | null
     ): VitaNetResponse;
 
-    /** Check whether Vita currently has an active network connection. */
+    /** Check whether Vita is connected to the network. */
     is_connected(): boolean;
 
-    /** Return current Vita IPv4 address. */
+    /** Return the current Vita IPv4 address. */
     get_ip(): string;
 
     /** Shut down SceHttp/SceNetCtl/SceNet resources. */
@@ -1081,6 +1127,7 @@ interface VitaConsoleAPI {
 
 declare const System: VitaSystemAPI;
 declare const Pads: VitaPadsAPI;
+declare const Touch: VitaTouchAPI;
 declare const Screen: VitaScreenAPI;
 declare const Font: VitaFontAPI;
 declare const Audio: VitaAudioAPI;

@@ -19,6 +19,9 @@ import { Game } from "./game.js";
 //   START              - restart game
 //   CIRCLE             - return to system view
 
+const bg=Audio.open_stream("app0:/assets/bg.ogg");
+Audio.play_stream(bg,.5,true);
+
 const font = Font.load_font_file("app0:/assets/segoeui.ttf");
 
 const WHITE  = 0xffffffff;

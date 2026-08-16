@@ -11,6 +11,7 @@
 VITAJS_MODULE(System, vitajs_system_init)
 VITAJS_MODULE(Screen, vitajs_screen_init)
 VITAJS_MODULE(Pads, vitajs_pads_init)
+VITAJS_MODULE(Touch, vitajs_touch_init)
 VITAJS_MODULE(Font, vitajs_font_init)
 VITAJS_MODULE(Net, vitajs_net_init)
 VITAJS_MODULE(Audio, vitajs_audio_init)

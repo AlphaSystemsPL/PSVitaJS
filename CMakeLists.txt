@@ -30,6 +30,7 @@ set(VITA_VERSION  "01.00")
 # Note that we make sure not to overwrite previous flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wno-all -Wno-int-conversion -DPATH_MAX=256")
 
+
 # Read the version directly from the upstream QuickJS directory.
 # Expected after this upgrade: 2026-06-04.
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/quickjs/VERSION" QUICKJS_VERSION LIMIT_COUNT 1)
@@ -102,6 +103,7 @@ target_link_libraries(${PROJECT_NAME}
     SceIme_stub
     ScePower_stub
     SceCtrl_stub
+    SceTouch_stub
     SceSysmem_stub
     ScePvf_stub
 
@@ -118,6 +120,8 @@ target_link_libraries(${PROJECT_NAME}
     c
     m
     pthread
+	vorbisidec
+	ogg
 )
 
 ## Create Vita files
@@ -135,6 +139,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
           src/assets/game.js assets/game.js
           src/assets/test1.png assets/test1.png
           src/assets/audio.wav assets/audio.wav
+          src/assets/bg.ogg assets/bg.ogg
           src/assets/coin.wav assets/coin.wav
           sce_sys/icon0.png sce_sys/icon0.png
           sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png

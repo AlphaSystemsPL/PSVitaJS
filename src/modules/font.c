@@ -4,22 +4,6 @@
 #include "../graphics.h"
 #include "../env.h"
 
-/*
- * Stable VitaJS Font module for file-based fonts (TTF/OTF supported by vita2d).
- *
- * API:
- *   const font = Font.load_font_file("app0:/assets/font.ttf");
- *   Font.font_draw_text(font, x, y, color, size, "Hello");
- *   Font.font_draw_text_ls(font, x, y, lineSpace, color, size, "Hello");
- *   Font.font_text_width(font, size, "Hello");
- *   Font.font_text_height(font, size, "Hello");
- *   Font.font_text_dimensions(font, size, "Hello");
- *   Font.free_font(font);
- *
- * This intentionally replaces the broken class-id / opaque handling in the
- * original VitaJS font module.
- */
-
 typedef struct FontData
 {
     vita2d_font *font;

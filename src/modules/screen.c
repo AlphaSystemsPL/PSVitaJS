@@ -1078,6 +1078,8 @@ static JSValue vitajs_load_BMP_file(JSContext *ctx, JSValue this_val, int argc, 
 }
 
 static const JSCFunctionListEntry module_funcs[] = {
+	JS_PROP_INT32_DEF("width", 960, JS_PROP_CONFIGURABLE),
+	JS_PROP_INT32_DEF("height", 544, JS_PROP_CONFIGURABLE),
 	JS_CFUNC_DEF("clear", 4, vitajs_clear),
 	JS_CFUNC_DEF("start_drawing", 0, vitajs_start_drawing),
 	JS_CFUNC_DEF("start_drawing_advanced", 2, vitajs_start_drawing_advanced),
