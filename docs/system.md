@@ -1,6 +1,75 @@
 # System and filesystem
 
-VitaJS exposes its native `System` API together with QuickJS `std` and `os`.
+`System` exposes Vita filesystem helpers, application metadata and selected system information. QuickJS `std` and `os` remain available alongside it.
+
+## Application manifest
+
+`System.manifest` contains the parsed contents of:
+
+```text
+app0:/sce_sys/param.sfo
+```
+
+All SFO keys are exposed on the object when they can be parsed.
+
+```js
+console.log(
+    System.manifest
+);
+```
+
+Convenience properties are available for common fields:
+
+```js
+console.log(
+    System.titleId,
+    System.title,
+    System.shortTitle,
+    System.version,
+    System.category,
+    System.contentId
+);
+```
+
+These values are read-only runtime module values.
+
+## System language
+
+```js
+console.log(
+    System.language,
+    System.languageId
+);
+```
+
+`System.language` uses a BCP-47-like tag such as:
+
+```text
+pl-PL
+en-US
+de-DE
+```
+
+`languageId` exposes the underlying Vita system language identifier.
+
+## Hardware model
+
+```js
+console.log(
+    System.model,
+    System.modelId,
+    System.isPSTV
+);
+```
+
+`System.model` currently distinguishes:
+
+```text
+PS Vita
+PS Vita TV
+```
+
+It does not distinguish PCH-1000 from PCH-2000.
 
 ## Check for a file
 
@@ -22,9 +91,28 @@ console.log(
 System.currentDir(
     "ux0:data/VITAJS001"
 );
+```
 
+List the current directory:
+
+```js
 const entries = System.listDir();
-console.log(entries);
+
+for (const entry of entries) {
+    console.log(
+        entry.name,
+        entry.size,
+        entry.dir
+    );
+}
+```
+
+or list an explicit path:
+
+```js
+const entries = System.listDir(
+    "ux0:data/VITAJS001"
+);
 ```
 
 Create and remove directories:
@@ -61,6 +149,19 @@ System.removeFile(
     "ux0:data/VITAJS001/archive-old.json"
 );
 ```
+
+Low-level file descriptors are also available through:
+
+```js
+System.openFile(...)
+System.readFile(...)
+System.writeFile(...)
+System.seekFile(...)
+System.sizeFile(...)
+System.closeFile(...)
+```
+
+See `vitajs.d.ts` for the file-mode and seek constants.
 
 ## Load text through QuickJS `std`
 

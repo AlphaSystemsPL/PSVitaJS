@@ -142,7 +142,8 @@ static JSValue manifest_field(JSContext *ctx, const char *key)
 	}
 FIELD_GETTER(get_title_id, "TITLE_ID")
 FIELD_GETTER(get_title, "TITLE")
-FIELD_GETTER(get_short_title, "STITLE") FIELD_GETTER(get_version, "APP_VER") FIELD_GETTER(get_category, "CATEGORY") FIELD_GETTER(get_content_id, "CONTENT_ID") static const char *language_name(int l)
+FIELD_GETTER(get_short_title, "STITLE")
+FIELD_GETTER(get_version, "APP_VER") FIELD_GETTER(get_category, "CATEGORY") FIELD_GETTER(get_content_id, "CONTENT_ID") static const char *language_name(int l)
 {
 	static const char *n[] = {"ja-JP", "en-US", "fr-FR", "es-ES", "de-DE", "it-IT", "nl-NL", "pt-PT", "ru-RU", "ko-KR", "zh-TW", "zh-CN", "fi-FI", "sv-SE", "da-DK", "no-NO", "pl-PL", "pt-BR", "en-GB", "tr-TR"};
 	return (l >= 0 && l < (int)(sizeof(n) / sizeof(n[0]))) ? n[l] : "unknown";
@@ -414,7 +415,8 @@ static JSValue vitajs_delay(JSContext *ctx, JSValueConst t, int argc, JSValueCon
 	}
 MEM_FN(vitajs_getFreeMemory, get_free_memory)
 MEM_FN(vitajs_getUsedMemory, get_used_memory)
-MEM_FN(vitajs_getFreeVRam, get_free_vram) MEM_FN(vitajs_getUsedVRam, get_used_vram) static JSValue vitajs_openfile(JSContext *ctx, JSValueConst t, int a, JSValueConst *v)
+MEM_FN(vitajs_getFreeVRam, get_free_vram)
+MEM_FN(vitajs_getUsedVRam, get_used_vram) static JSValue vitajs_openfile(JSContext *ctx, JSValueConst t, int a, JSValueConst *v)
 {
 	(void)t;
 	if (a != 2)
@@ -546,9 +548,42 @@ static void setModulePath(void)
 	getcwd(modulePath, sizeof(modulePath));
 	snprintf(boot_path, sizeof(boot_path), "%s", modulePath);
 }
+
 static const JSCFunctionListEntry system_funcs[] = {
-	JS_CFUNC_DEF("openFile", 2, vitajs_openfile), JS_CFUNC_DEF("readFile", 2, vitajs_readfile), JS_CFUNC_DEF("writeFile", 3, vitajs_writefile), JS_CFUNC_DEF("closeFile", 1, vitajs_closefile), JS_CFUNC_DEF("seekFile", 3, vitajs_seekfile), JS_CFUNC_DEF("sizeFile", 1, vitajs_sizefile), JS_CFUNC_DEF("doesFileExist", 1, vitajs_checkexist), JS_CFUNC_DEF("currentDir", 1, vitajs_curdir), JS_CFUNC_DEF("listDir", 1, vitajs_dir), JS_CFUNC_DEF("createDirectory", 1, vitajs_createDir), JS_CFUNC_DEF("removeDirectory", 1, vitajs_removeDir), JS_CFUNC_DEF("moveFile", 2, vitajs_movefile), JS_CFUNC_DEF("copyFile", 2, vitajs_copyfile), JS_CFUNC_DEF("removeFile", 1, vitajs_removeFile), JS_CFUNC_DEF("rename", 2, vitajs_rename), JS_CFUNC_DEF("delay", 1, vitajs_delay), JS_CFUNC_DEF("get_free_memory", 0, vitajs_getFreeMemory), JS_CFUNC_DEF("get_used_memory", 0, vitajs_getUsedMemory), JS_CFUNC_DEF("get_free_vram", 0, vitajs_getFreeVRam), JS_CFUNC_DEF("get_used_vram", 0, vitajs_getUsedVRam), JS_CFUNC_DEF("exit", 0, vitajs_exit), JS_CFUNC_DEF("loadELF", 2, vitajs_loadELF),
-	JS_PROP_STRING_DEF("boot_path", boot_path, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("FREAD", O_RDONLY, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("FWRITE", O_WRONLY, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("FCREATE", O_CREAT | O_WRONLY, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("FRDWR", O_RDWR, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("SET", SEEK_SET, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("END", SEEK_END, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("CUR", SEEK_CUR, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("READ_ONLY", 1, JS_PROP_CONFIGURABLE), JS_PROP_INT32_DEF("SELECT", 2, JS_PROP_CONFIGURABLE)};
+	JS_CFUNC_DEF("openFile", 2, vitajs_openfile),
+	JS_CFUNC_DEF("readFile", 2, vitajs_readfile),
+	JS_CFUNC_DEF("writeFile", 3, vitajs_writefile),
+	JS_CFUNC_DEF("closeFile", 1, vitajs_closefile),
+	JS_CFUNC_DEF("seekFile", 3, vitajs_seekfile),
+	JS_CFUNC_DEF("sizeFile", 1, vitajs_sizefile),
+	JS_CFUNC_DEF("doesFileExist", 1, vitajs_checkexist),
+	JS_CFUNC_DEF("currentDir", 1, vitajs_curdir),
+	JS_CFUNC_DEF("listDir", 1, vitajs_dir),
+	JS_CFUNC_DEF("createDirectory", 1, vitajs_createDir),
+	JS_CFUNC_DEF("removeDirectory", 1, vitajs_removeDir),
+	JS_CFUNC_DEF("moveFile", 2, vitajs_movefile),
+	JS_CFUNC_DEF("copyFile", 2, vitajs_copyfile),
+	JS_CFUNC_DEF("removeFile", 1, vitajs_removeFile),
+	JS_CFUNC_DEF("rename", 2, vitajs_rename),
+	JS_CFUNC_DEF("delay", 1, vitajs_delay),
+	JS_CFUNC_DEF("get_free_memory", 0, vitajs_getFreeMemory),
+	JS_CFUNC_DEF("get_used_memory", 0, vitajs_getUsedMemory),
+	JS_CFUNC_DEF("get_free_vram", 0, vitajs_getFreeVRam),
+	JS_CFUNC_DEF("get_used_vram", 0, vitajs_getUsedVRam),
+	JS_CFUNC_DEF("exit", 0, vitajs_exit),
+	JS_CFUNC_DEF("loadELF", 2, vitajs_loadELF),
+	JS_PROP_STRING_DEF("boot_path", boot_path, JS_PROP_CONFIGURABLE),
+	JS_PROP_INT32_DEF("FREAD", O_RDONLY, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("FWRITE", O_WRONLY, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("FCREATE", O_CREAT | O_WRONLY, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("FRDWR", O_RDWR, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("SET", SEEK_SET, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("END", SEEK_END, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("CUR", SEEK_CUR, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("READ_ONLY", 1, JS_PROP_CONFIGURABLE), 
+	JS_PROP_INT32_DEF("SELECT", 2, JS_PROP_CONFIGURABLE)
+};
+
 static const char *system_info_exports[] = {
 	"manifest",
 	"titleId",

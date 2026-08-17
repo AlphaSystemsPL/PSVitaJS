@@ -32,11 +32,14 @@ Current VitaJS functionality includes:
 - ES modules
 - 2D rendering with vita2d
 - PNG, JPG and BMP textures
-- PS Vita controls and analog sticks
+- PS Vita controls, analog sticks and multi-controller ports
+- front and rear touch input
 - TTF/OTF font rendering
 - WAV sound effects with a native audio mixer
+- streamed PCM WAV and OGG/Vorbis audio for music and longer tracks
 - synchronous HTTP requests
 - filesystem access through `System`, `std` and `os`
+- application metadata, system language and Vita / Vita TV model information
 - QuickJS timers
 - native PS Vita message dialogs and IME keyboard
 - application lifecycle helpers
@@ -49,11 +52,12 @@ Current VitaJS functionality includes:
 | Module | Purpose |
 | --- | --- |
 | `Screen` | Rendering, textures and drawing |
-| `Pads` | Buttons and analog sticks |
+| `Pads` | Buttons, analog sticks and controller ports |
+| `Touch` | Front/rear touch input, panel info and sampling |
 | `Font` | TTF/OTF font loading and text rendering |
-| `Audio` | WAV loading, playback and mixing |
-| `Net` | Synchronous HTTP GET/POST/request |
-| `System` | Vita filesystem and system helpers |
+| `Audio` | WAV SFX, mixing and WAV/OGG streaming |
+| `Net` | Promise-based HTTP/HTTPS fetch and direct-to-disk download |
+| `System` | Filesystem, app metadata, language and hardware model helpers |
 | `App` | Process exit, launch params, system events and info bar |
 | `Dialog` | Native message dialogs and IME keyboard |
 | `Power` | Battery, clocks, suspend, standby and display power |
@@ -72,10 +76,11 @@ JavaScript game / app
         │
         ├── Screen ──► vita2d / SceGxm
         ├── Pads   ──► SceCtrl
+        ├── Touch  ──► SceTouch
         ├── Font   ──► vita2d / FreeType
-        ├── Audio  ──► SceAudioOut
-        ├── Net    ──► SceHttp / SceNet
-        ├── System ──► Vita filesystem APIs
+        ├── Audio  ──► SceAudioOut / Tremor
+        ├── Net    ──► SceHttp / SceNet / SceSsl
+        ├── System ──► filesystem / SFO / system params
         ├── App    ──► SceAppMgr / process manager
         ├── Dialog ──► SceCommonDialog / SceIme
         └── Power  ──► ScePower
@@ -105,11 +110,12 @@ API examples are kept in separate files under [`docs/`](docs/README.md).
 | --- | --- |
 | [Quick start](docs/quick-start.md) | Minimal VitaJS application structure |
 | [Screen](docs/screen.md) | Rendering, textures and primitives |
-| [Pads](docs/pads.md) | Buttons and analog sticks |
+| [Pads](docs/pads.md) | Buttons, analog sticks and controller ports |
+| [Touch](docs/touch.md) | Front/rear touch input and panel control |
 | [Font](docs/font.md) | Loading fonts, drawing and measuring text |
-| [Audio](docs/audio.md) | WAV loading, voices and volume |
-| [Net](docs/net.md) | Synchronous HTTP requests |
-| [System](docs/system.md) | Filesystem and dynamic script loading |
+| [Audio](docs/audio.md) | WAV SFX plus WAV/OGG streamed audio |
+| [Net](docs/net.md) | Promise-based HTTP/HTTPS fetch and downloads |
+| [System](docs/system.md) | Filesystem, manifest, language and hardware info |
 | [App](docs/app.md) | Lifecycle, events and process helpers |
 | [Dialog](docs/dialog.md) | Native message boxes and IME keyboard |
 | [Power](docs/power.md) | Battery, clocks and power management |
@@ -136,7 +142,13 @@ Install the libraries used by VitaJS:
 vdpm install libvita2d bzip2
 ```
 
-The build also uses VitaSDK system libraries for graphics, controls, dialogs, power, audio and networking.
+OGG/Vorbis streaming additionally requires **libogg** and **libtremor** from VDPM. With the current VDPM CLI these packages can be installed from the VDPM directory with:
+
+```bash
+./vdpm libogg libtremor
+```
+
+The build also uses VitaSDK system libraries for graphics, controls, touch, dialogs, power, audio, networking and SSL. `vorbisidec` must be linked before `ogg` because Tremor depends on libogg.
 
 ---
 
@@ -191,6 +203,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
         src/assets/test1.png assets/test1.png
         src/assets/segoeui.ttf assets/segoeui.ttf
         src/assets/audio.wav assets/audio.wav
+        src/assets/music.ogg assets/music.ogg
 
         sce_sys/icon0.png sce_sys/icon0.png
         sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
@@ -281,7 +294,6 @@ Example registry entry:
 VITAJS_MODULE(Example, vitajs_example_init)
 ```
 
-`net_async.c` is currently experimental and intentionally excluded from the automatic module source list.
 
 ---
 
@@ -301,12 +313,10 @@ VitaJS is still under active development.
 
 Notable limitations include:
 
-- HTTP requests are synchronous and block the JavaScript/game loop
-- audio currently focuses on WAV sound effects rather than streamed music
-- several legacy/experimental VitaJS APIs are incomplete
-- there is no browser DOM
-- there is no browser `fetch()`
+- `Net.fetch()` / `Net.download()` return Promises, but the current native SceHttp transfer still runs on the QuickJS/main thread and can block the render/game loop while I/O is in progress
+- VitaJS is not a browser runtime: there is no DOM and no global browser `fetch()`; use `Net.fetch()` instead
 - there is no Node.js API
+- several legacy/experimental VitaJS APIs are incomplete
 - hardware-facing APIs can behave differently or be unavailable in Vita3K
 
 For native module development, test on real hardware whenever possible.
@@ -317,15 +327,14 @@ For native module development, test on real hardware whenever possible.
 
 Potential future improvements include:
 
-- Promise-based asynchronous networking
-- streamed background music
-- touch input
+- truly non-blocking network I/O while preserving the current Promise API
 - motion sensors
 - save-data helpers
 - remote JavaScript/content loading
 - application/content updater
 - more complete texture and graphics APIs
 - improved error reporting and diagnostics
+- additional hardware-specific input and system integrations
 
 ---
 
