@@ -139,7 +139,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
           src/assets/game.js assets/game.js
           src/assets/test1.png assets/test1.png
           src/assets/audio.wav assets/audio.wav
-          src/assets/bg.ogg assets/bg.ogg
+          src/assets/bg.wav assets/bg.wav
           src/assets/coin.wav assets/coin.wav
           sce_sys/icon0.png sce_sys/icon0.png
           sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
